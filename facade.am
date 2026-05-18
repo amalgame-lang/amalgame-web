@@ -71,16 +71,16 @@ import Amalgame.String
 public class Route {
     public Method:      string                  // "GET" / "POST" / ...
     public Path:        string                  // "/users/:id"
-    public HandlerName: string                  // user-defined dispatch key
-    public Segments:    List<string>            // pre-split: ["", "users", ":id"]
+    public Handler:     Closure                 // (WebContext) → HttpResponse
+    public Segments:    List<string>            // pre-split: ["users", ":id"]
     public ParamNames:  List<string>            // [":id" → "id"], for fast match
 
-    public Route(string method, string path, string handlerName) {
-        this.Method      = method
-        this.Path        = path
-        this.HandlerName = handlerName
-        this.Segments    = Route.SplitPath(path)
-        this.ParamNames  = new List<string>()
+    public Route(string method, string path, Closure handler) {
+        this.Method     = method
+        this.Path       = path
+        this.Handler    = handler
+        this.Segments   = Route.SplitPath(path)
+        this.ParamNames = new List<string>()
         let sn: int = this.Segments.Count()
         for i in 0..sn {
             let seg: string = this.Segments.Get(i)
@@ -95,6 +95,16 @@ public class Route {
             }
         }
     }
+
+    // To invoke the handler, call `route.Handler(ctx)` directly.
+    // The return value's static type at the AM level is currently
+    // unspecified (closures are untyped in v0.8.x — args/result
+    // erased to i64/void* at the C level). User code typically
+    // casts the return to its expected concrete type, e.g.:
+    //
+    //   let resp = route.Handler(ctx)        // result is i64-erased
+    //
+    // A future typed-Closure language feature will tighten this.
 
     // Split "/users/:id/posts" into ["users", ":id", "posts"].
     // Empty path or "/" → empty list. Leading slash stripped.
@@ -128,12 +138,12 @@ public class Route {
 // ─────────────────────────────────────────────────────────────────
 
 public class RouteMatch {
-    public HandlerName: string
-    public Params:      Map<string, string>     // ":id" → "42"
+    public Route:   Route                       // the matched route (carries the handler)
+    public Params:  Map<string, string>         // ":id" → "42"
 
-    public RouteMatch(string handlerName) {
-        this.HandlerName = handlerName
-        this.Params      = new Map<string, string>()
+    public RouteMatch(Route r) {
+        this.Route  = r
+        this.Params = new Map<string, string>()
     }
 }
 
@@ -156,17 +166,20 @@ public class Router {
         this.Routes = new List<Route>()
     }
 
-    // Register a route. Returns the router for chaining.
-    public Router Add(string method, string path, string handlerName) {
-        this.Routes.Add(new Route(method, path, handlerName))
+    // Register a route. The handler is a closure taking a single
+    // WebContext arg and returning whatever the framework should
+    // ship back (typically an HttpResponse from amalgame-net-http).
+    // Returns the router for chaining.
+    public Router Add(string method, string path, Closure handler) {
+        this.Routes.Add(new Route(method, path, handler))
         return this
     }
 
-    public Router Get(string path, string handlerName)    { return this.Add("GET", path, handlerName) }
-    public Router Post(string path, string handlerName)   { return this.Add("POST", path, handlerName) }
-    public Router Put(string path, string handlerName)    { return this.Add("PUT", path, handlerName) }
-    public Router Patch(string path, string handlerName)  { return this.Add("PATCH", path, handlerName) }
-    public Router Delete(string path, string handlerName) { return this.Add("DELETE", path, handlerName) }
+    public Router Get(string path, Closure handler)    { return this.Add("GET", path, handler) }
+    public Router Post(string path, Closure handler)   { return this.Add("POST", path, handler) }
+    public Router Put(string path, Closure handler)    { return this.Add("PUT", path, handler) }
+    public Router Patch(string path, Closure handler)  { return this.Add("PATCH", path, handler) }
+    public Router Delete(string path, Closure handler) { return this.Add("DELETE", path, handler) }
 
     // Match (method, path) against registered routes. Returns null if
     // no route matches, else a RouteMatch with extracted params.
@@ -186,7 +199,7 @@ public class Router {
     private static RouteMatch TryMatchOne(Route r, List<string> reqSegs) {
         let rsn: int = r.Segments.Count()
         let qsn: int = reqSegs.Count()
-        let m = new RouteMatch(r.HandlerName)
+        let m = new RouteMatch(r)
         var i: int = 0
         while (i < rsn) {
             let routeSeg: string = r.Segments.Get(i)
