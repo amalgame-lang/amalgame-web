@@ -22,7 +22,7 @@ name              = "amalgame-web"
 version           = "0.1.0"
 license           = "Apache-2.0"
 description       = "Mosaic — the Amalgame web framework. v0.1: routing + sessions foundation."
-required-amalgame = ">=0.8.29"
+required-amalgame = ">=0.8.30"
 schema-version    = 1
 
 [stdlib]
