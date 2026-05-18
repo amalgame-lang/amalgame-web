@@ -25,7 +25,9 @@ if [ -z "$AMC" ] || [ ! -x "$AMC" ]; then
 fi
 
 RUNTIME_DIR=""
-if [ -d "$PKG_DIR/../Amalgame/runtime" ]; then
+if [ -n "$AMC_RUNTIME" ] && [ -d "$AMC_RUNTIME" ]; then
+    RUNTIME_DIR="$AMC_RUNTIME"
+elif [ -d "$PKG_DIR/../Amalgame/runtime" ]; then
     RUNTIME_DIR="$PKG_DIR/../Amalgame/runtime"
 elif [ -d "$HOME/.amalgame/runtime" ]; then
     RUNTIME_DIR="$HOME/.amalgame/runtime"
