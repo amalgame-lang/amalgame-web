@@ -88,13 +88,10 @@ public class Program {
         }
 
         // ── Handler invocation (the new FCF capability!) ──────────
-        // Closures are called directly via `route.Handler(ctx)`.
-        // The receiver must be a local (cgen v0.8.30 limitation —
-        // nested member access like `m.Route.Handler(...)` isn't
-        // yet recognized; bind to a local first).
+        // Nested member access `m.Route.Handler(ctx)` works directly
+        // since amc v0.8.33 (ResolveReceiverClass walks MEMBER chains).
         let ctx = new WebContext()
-        let route1: Route = m1.Route
-        let res1: int = route1.Handler(ctx)
+        let res1: int = m1.Route.Handler(ctx)
         if (res1 == 1) {
             Console.WriteLine("[PASS] handler invoked: / → 1")
         } else {
@@ -102,16 +99,14 @@ public class Program {
         }
 
         ctx.Params = m5.Params
-        let route5: Route = m5.Route
-        let res5: int = route5.Handler(ctx)
+        let res5: int = m5.Route.Handler(ctx)
         if (res5 == 100) {
             Console.WriteLine("[PASS] handler invoked: /users/:id → 100")
         } else {
             Console.WriteLine("[FAIL] handler invoked /users/:id got " + String_FromInt(res5))
         }
 
-        let route7: Route = m7.Route
-        let res7: int = route7.Handler(ctx)
+        let res7: int = m7.Route.Handler(ctx)
         if (res7 == 400) {
             Console.WriteLine("[PASS] handler invoked: two :params → 400")
         } else {
