@@ -1,0 +1,318 @@
+// amalgame-web — Mosaic web framework, v0.1 foundation.
+//
+// What's IN v0.1:
+//   - Router         pattern matching with `:param` and `*splat`
+//   - Route          a (method, path, handler-name) tuple
+//   - RouteMatch     match result with extracted path params
+//   - Session        in-memory key/value store with TTL
+//   - MemorySessionStore  thread-unsafe in-memory store (dev/test)
+//   - WebContext     per-request bag: path params, state, session id
+//
+// What's NOT YET in v0.1 (deferred to v0.1.x):
+//   - WebApp.Get/Post/Use(handler) — needs first-class functions in AM
+//   - Middleware pipeline           — needs first-class functions
+//   - Filesystem-based routing      — needs the above + module loader
+//   - DEV mode (file watcher + hot dlopen)
+//   - ACME / TLS integration
+//   - JsonFileSessionStore, RedisSessionStore
+//   - Security middleware (CSRF, CORS, rate limit, …)
+//   - Reverse proxy
+//
+// v0.1 user pattern (manual dispatch using net-http directly):
+//
+//   import Amalgame.Net.Http
+//   import Amalgame.Web
+//
+//   let router = new Router()
+//   router.Add("GET",  "/",           "home")
+//   router.Add("GET",  "/users/:id",  "user_show")
+//   router.Add("POST", "/users",      "user_create")
+//
+//   let srv = TcpServer_Listen(3000, 16)
+//   while (TcpServer_IsListening(srv)) {
+//       let conn = TcpServer_Accept(srv)
+//       let raw  = TcpConn_Receive(conn, 65536)
+//       let req  = HttpParser.ParseFull(raw)
+//       if (req == null) {
+//           TcpConn_Send(conn, HttpServer.BadRequestResponse())
+//           TcpConn_Close(conn)
+//           continue
+//       }
+//       let m = router.Match(req.Method, req.Path)
+//       var resp = new HttpResponse()
+//       if (m == null) {
+//           resp = HttpResponse.New().Status(404).Text("Not found")
+//       } else if (m.HandlerName == "home") {
+//           resp = HttpResponse.New().Text("Welcome")
+//       } else if (m.HandlerName == "user_show") {
+//           let id = m.Params.Get("id")
+//           resp = HttpResponse.New().Text("User " + id)
+//       } else if (m.HandlerName == "user_create") {
+//           resp = HttpResponse.New().Status(201).Json("{\"ok\":true}")
+//       }
+//       TcpConn_Send(conn, resp.Render())
+//       TcpConn_Close(conn)
+//   }
+//   TcpServer_Close(srv)
+//
+// The `m.HandlerName` indirection is the manual-dispatch v0.1 cost
+// for not having first-class functions. v0.1.x will replace it with
+// a real handler-fn registry.
+
+namespace Amalgame.Web
+
+import Amalgame.Collections
+import Amalgame.String
+
+// ─────────────────────────────────────────────────────────────────
+// Route — one registered route.
+// ─────────────────────────────────────────────────────────────────
+
+public class Route {
+    public Method:      string                  // "GET" / "POST" / ...
+    public Path:        string                  // "/users/:id"
+    public HandlerName: string                  // user-defined dispatch key
+    public Segments:    List<string>            // pre-split: ["", "users", ":id"]
+    public ParamNames:  List<string>            // [":id" → "id"], for fast match
+
+    public Route(string method, string path, string handlerName) {
+        this.Method      = method
+        this.Path        = path
+        this.HandlerName = handlerName
+        this.Segments    = Route.SplitPath(path)
+        this.ParamNames  = new List<string>()
+        let sn: int = this.Segments.Count()
+        for i in 0..sn {
+            let seg: string = this.Segments.Get(i)
+            if (String_StartsWith(seg, ":")) {
+                let n: int = String_Length(seg)
+                this.ParamNames.Add(String_Substring(seg, 1, n - 1))
+            } else if (String_StartsWith(seg, "*")) {
+                let n: int = String_Length(seg)
+                this.ParamNames.Add(String_Substring(seg, 1, n - 1))
+            } else {
+                this.ParamNames.Add("")
+            }
+        }
+    }
+
+    // Split "/users/:id/posts" into ["users", ":id", "posts"].
+    // Empty path or "/" → empty list. Leading slash stripped.
+    public static List<string> SplitPath(string path) {
+        let parts: List<string> = new List<string>()
+        let n: int = String_Length(path)
+        if (n == 0) { return parts }
+        var start: int = 0
+        if (String_StartsWith(path, "/")) { start = 1 }
+        var i: int = start
+        var segStart: int = start
+        while (i < n) {
+            let c: string = String_CharAt1(path, i)
+            if (c == "/") {
+                if (i > segStart) {
+                    parts.Add(String_Substring(path, segStart, i - segStart))
+                }
+                segStart = i + 1
+            }
+            i = i + 1
+        }
+        if (n > segStart) {
+            parts.Add(String_Substring(path, segStart, n - segStart))
+        }
+        return parts
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// RouteMatch — successful match result.
+// ─────────────────────────────────────────────────────────────────
+
+public class RouteMatch {
+    public HandlerName: string
+    public Params:      Map<string, string>     // ":id" → "42"
+
+    public RouteMatch(string handlerName) {
+        this.HandlerName = handlerName
+        this.Params      = new Map<string, string>()
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Router — collection of routes + matching engine.
+//
+// Matching rules:
+//   - Literal segments: must match exactly.
+//   - `:name` segment:  matches any single segment, captured as `name`.
+//   - `*name` segment:  catch-all, matches remaining path, captured as `name`.
+//   - Method comparison: exact, case-sensitive (uppercase convention).
+//   - First-match-wins (registration order). Static routes should
+//     therefore be registered BEFORE parameterized ones.
+// ─────────────────────────────────────────────────────────────────
+
+public class Router {
+    public Routes: List<Route>
+
+    public Router() {
+        this.Routes = new List<Route>()
+    }
+
+    // Register a route. Returns the router for chaining.
+    public Router Add(string method, string path, string handlerName) {
+        this.Routes.Add(new Route(method, path, handlerName))
+        return this
+    }
+
+    public Router Get(string path, string handlerName)    { return this.Add("GET", path, handlerName) }
+    public Router Post(string path, string handlerName)   { return this.Add("POST", path, handlerName) }
+    public Router Put(string path, string handlerName)    { return this.Add("PUT", path, handlerName) }
+    public Router Patch(string path, string handlerName)  { return this.Add("PATCH", path, handlerName) }
+    public Router Delete(string path, string handlerName) { return this.Add("DELETE", path, handlerName) }
+
+    // Match (method, path) against registered routes. Returns null if
+    // no route matches, else a RouteMatch with extracted params.
+    public RouteMatch Match(string method, string path) {
+        let reqSegs: List<string> = Route.SplitPath(path)
+        let rn: int = this.Routes.Count()
+        for ri in 0..rn {
+            let r: Route = this.Routes.Get(ri)
+            if (r.Method != method) { continue }
+            let m: RouteMatch = Router.TryMatchOne(r, reqSegs)
+            if (m != null) { return m }
+        }
+        return null
+    }
+
+    // Internal — try to match one route against the request segments.
+    private static RouteMatch TryMatchOne(Route r, List<string> reqSegs) {
+        let rsn: int = r.Segments.Count()
+        let qsn: int = reqSegs.Count()
+        let m = new RouteMatch(r.HandlerName)
+        var i: int = 0
+        while (i < rsn) {
+            let routeSeg: string = r.Segments.Get(i)
+            if (String_StartsWith(routeSeg, "*")) {
+                // Catch-all: consume everything from here.
+                let paramName: string = r.ParamNames.Get(i)
+                var rest: string = ""
+                var j: int = i
+                while (j < qsn) {
+                    if (j > i) { rest = rest + "/" }
+                    rest = rest + reqSegs.Get(j)
+                    j = j + 1
+                }
+                m.Params.Set(paramName, rest)
+                return m
+            }
+            if (i >= qsn) { return null }     // route longer than request
+            let qSeg: string = reqSegs.Get(i)
+            if (String_StartsWith(routeSeg, ":")) {
+                let paramName: string = r.ParamNames.Get(i)
+                m.Params.Set(paramName, qSeg)
+            } else if (routeSeg != qSeg) {
+                return null
+            }
+            i = i + 1
+        }
+        if (i != qsn) { return null }         // request longer than route
+        return m
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Session — in-memory key/value store carried by a session cookie.
+//
+// Values are typed as string for v0.1 (JSON-encodable). v0.1.x will
+// add typed accessors once we generalize JsonValue storage.
+// ─────────────────────────────────────────────────────────────────
+
+public class Session {
+    public Id:        string
+    public Data:      Map<string, string>
+    public CreatedAt: int                       // Unix epoch seconds
+    public TouchedAt: int                       // updated on Get/Set
+    public MaxAgeSec: int
+
+    public Session(string id) {
+        this.Id        = id
+        this.Data      = new Map<string, string>()
+        this.CreatedAt = 0
+        this.TouchedAt = 0
+        this.MaxAgeSec = 86400
+    }
+
+    public string Get(string key) {
+        if (this.Data.Has(key)) { return this.Data.Get(key) }
+        return ""
+    }
+    public void Set(string key, string value) { this.Data.Set(key, value) }
+    public void Delete(string key) { this.Data.Remove(key) }
+    public void Clear() { this.Data = new Map<string, string>() }
+    public bool Has(string key) { return this.Data.Has(key) }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// MemorySessionStore — thread-unsafe in-process session storage.
+// Suitable for development and tests. Production deployments should
+// use JsonFileSessionStore (v0.1.x) or RedisSessionStore (v0.7).
+// ─────────────────────────────────────────────────────────────────
+
+public class MemorySessionStore {
+    public Sessions: Map<string, Session>
+
+    public MemorySessionStore() {
+        this.Sessions = new Map<string, Session>()
+    }
+
+    // Find a session by id, or null.
+    public Session Find(string id) {
+        if (this.Sessions.Has(id)) { return this.Sessions.Get(id) }
+        return null
+    }
+
+    // Create + register a new session with a caller-provided id.
+    // Use Router-generated tokens (256-bit random) for prod; tests
+    // can pass predictable ids.
+    public Session Create(string id) {
+        let s = new Session(id)
+        this.Sessions.Set(id, s)
+        return s
+    }
+
+    // Remove a session.
+    public void Destroy(string id) {
+        this.Sessions.Remove(id)
+    }
+
+    public int Size() { return this.Sessions.Size() }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// WebContext — per-request "bag" of conveniences.
+//
+// In v0.1.x this becomes the canonical handler argument. For v0.1,
+// it's a standalone value the user can populate manually.
+// ─────────────────────────────────────────────────────────────────
+
+public class WebContext {
+    public Params:    Map<string, string>     // path params from RouteMatch
+    public State:     Map<string, string>     // app-level shared state (string-typed v0.1)
+    public Session:   Session                 // null if no session
+    public RequestId: string
+
+    public WebContext() {
+        this.Params    = new Map<string, string>()
+        this.State     = new Map<string, string>()
+        this.Session   = null
+        this.RequestId = ""
+    }
+
+    public string Param(string name) {
+        if (this.Params.Has(name)) { return this.Params.Get(name) }
+        return ""
+    }
+
+    public string StateOf(string name) {
+        if (this.State.Has(name)) { return this.State.Get(name) }
+        return ""
+    }
+}
