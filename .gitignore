@@ -1,0 +1,9 @@
+build/
+*.o
+*.so
+*.a
+.amweb-cache/
+.DS_Store
+.vscode/
+*.swp
+*~

@@ -1,0 +1,43 @@
+# amalgame-web — Mosaic web framework for Amalgame.
+#
+# v0.1 ships the foundation pieces: Router (path matching with
+# `:param` + `*splat`), MemorySessionStore + Session, WebContext.
+# Full request-handling pipeline (programmatic routing with first-
+# class function handlers, middleware chain, filesystem routing,
+# DEV mode hot-reload) lands incrementally as AM grows the
+# required language features (first-class function types).
+#
+# Install:
+#   amc package add tls          # for HTTPS
+#   amc package add net-http     # HTTP/1.1 parser + types
+#   amc package add web          # this package
+#
+# See proposal: docs/proposals/amalgame-web.md
+#
+# Marketing name: "Mosaic" (used in README, talks, blog posts).
+# Code, manifests, imports all use Amalgame.Web.
+
+[package]
+name              = "amalgame-web"
+version           = "0.1.0"
+license           = "Apache-2.0"
+description       = "Mosaic — the Amalgame web framework. v0.1: routing + sessions foundation."
+required-amalgame = ">=0.8.29"
+schema-version    = 1
+
+[stdlib]
+# Multi-class manifest (uses amc v0.8.29 multi-class extension).
+# v0.1 ships routing + sessions; WebApp comes in v0.1.x once
+# language-level first-class function types land.
+classes   = [
+    "Router",
+    "Route",
+    "RouteMatch",
+    "Session",
+    "MemorySessionStore",
+    "WebContext",
+]
+header    = "runtime/Amalgame_Web.h"
+namespace = "Amalgame.Web"
+facade    = "facade.am"
+libs      = []
