@@ -1,0 +1,13 @@
+// app/about.am  →  GET /about
+
+import Amalgame.Web
+
+public class Page {
+    public static HttpResponse GET(WebContext ctx) {
+        return HttpResponse.New().Text(
+            "About this demo:\n" +
+            "  - 4 static .am files under app/\n" +
+            "  - one shell script generates _routes.am\n" +
+            "  - amalgame-web's Router does the matching\n")
+    }
+}
