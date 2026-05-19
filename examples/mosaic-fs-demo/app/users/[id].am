@@ -1,0 +1,10 @@
+// app/users/[id].am  →  GET /users/:id
+
+import Amalgame.Web
+
+public class Page {
+    public static HttpResponse GET(WebContext ctx) {
+        let id: string = ctx.Param("id")
+        return HttpResponse.New().Text("User #" + id + "\n")
+    }
+}

@@ -1,0 +1,15 @@
+// app/api/info.am  →  GET /api/info  +  POST /api/info
+
+import Amalgame.Web
+
+public class Page {
+    public static HttpResponse GET(WebContext ctx) {
+        let json: string = "{\"app\":\"mosaic-fs-demo\",\"version\":\"0.2.0\"," +
+            "\"routing\":\"filesystem-discovered\"}"
+        return HttpResponse.New().Json(json)
+    }
+
+    public static HttpResponse POST(WebContext ctx) {
+        return HttpResponse.New().Status(201).Json("{\"created\":true}")
+    }
+}

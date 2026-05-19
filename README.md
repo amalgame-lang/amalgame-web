@@ -17,20 +17,55 @@ Focused, working set:
 - **Session** + **MemorySessionStore** (dev / test storage)
 - **WebContext** — per-request bag (path params + app state + session)
 
-## v0.1.x — coming next
+## v0.2 — filesystem routing (Next.js App Router style)
 
-These pieces are blocked on a language-level upgrade to amc
-(first-class function types so `app.Get("/path", handler)` can take
-a real callable). Once that lands, all of this drops in:
+Drop `.am` files in `app/`; the build tool wires them into a Router.
+See [`examples/mosaic-fs-demo/`](examples/mosaic-fs-demo/) for a
+working demo served over HTTP/2 (h2c).
 
-- `WebApp.Get/Post/Put/Patch/Delete(path, handler)` programmatic routing
-- `WebApp.Use(middleware)` middleware pipeline
-- Filesystem-based routing (`app/users/[id].am` → `/users/:id`)
-- DEV mode (file watcher + hot dlopen)
-- ACME / Let's Encrypt integration via amalgame-tls
-- Security middleware (CSRF, CORS, rate limit, ...)
+```text
+app/index.am          → GET /
+app/about.am          → GET /about
+app/users/[id].am     → GET /users/:id
+app/api/info.am       → GET /api/info  +  POST /api/info
+app/blog/[...slug].am → GET /blog/*slug
+```
+
+Each file declares **one `public class Page`** with HTTP verbs as
+static methods:
+
+```amalgame
+// app/users/[id].am
+import Amalgame.Web
+
+public class Page {
+    public static HttpResponse GET(WebContext ctx) {
+        return HttpResponse.New().Text("user " + ctx.Param("id"))
+    }
+}
+```
+
+Build:
+
+```bash
+tools/mosaic-routes.sh app _routes.am      # scan + glue
+tools/mosaic-build.sh                       # → ./server
+```
+
+`mosaic-routes.sh` concatenates each file into a single `_routes.am`,
+renaming each `class Page` to `<PathPrefix>_Page` so collisions are
+impossible. `mosaic-build.sh` then drives `amc` + `gcc` end-to-end.
+
+## v0.2.x / v0.3 — coming next
+
+- **DEV mode** — `mosaic dev`: file watcher + `app.so` via
+  `gcc -shared -fPIC` + `dlopen` hot-swap so route changes don't
+  need a restart
+- ACME / Let's Encrypt via amalgame-tls
+- Middleware (CSRF, CORS, rate limit, …)
 - JsonFileSessionStore, RedisSessionStore
 - Reverse proxy
+- Layout / nested layout files
 
 ## Install
 
