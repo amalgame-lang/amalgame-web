@@ -1,0 +1,15 @@
+[package]
+name        = "mosaic-fs-demo"
+version     = "0.1.0"
+entry       = "server.am"
+description = "Filesystem-routed demo for amalgame-web v0.2 (served over h2c)."
+
+[[dependencies]]
+name = "web"
+git  = "github.com/amalgame-lang/amalgame-web"
+tag  = "v0.2.0"
+
+[[dependencies]]
+name = "net-http"
+git  = "github.com/amalgame-lang/amalgame-net-http"
+tag  = "v0.2.0"

@@ -1,15 +1,18 @@
 # amalgame-web — Mosaic web framework for Amalgame.
 #
-# v0.1 ships the foundation pieces: Router (path matching with
-# `:param` + `*splat`), MemorySessionStore + Session, WebContext.
-# Full request-handling pipeline (programmatic routing with first-
-# class function handlers, middleware chain, filesystem routing,
-# DEV mode hot-reload) lands incrementally as AM grows the
-# required language features (first-class function types).
+# v0.1: Router (path matching with `:param` + `*splat`),
+#       MemorySessionStore + Session, WebContext.
+# v0.2: Filesystem-based routing — `tools/mosaic-routes.sh` scans
+#       an `app/` directory and emits a `_routes.am` glue module
+#       that registers every file as a route. Next.js App Router
+#       convention: one file per route, methods named after HTTP
+#       verbs (GET/POST/PUT/PATCH/DELETE).
+#       DEV mode (filewatcher + app.so + hot dlopen) is planned
+#       for v0.2.x once the dlopen + GC story is settled.
 #
 # Install:
 #   amc package add tls          # for HTTPS
-#   amc package add net-http     # HTTP/1.1 parser + types
+#   amc package add net-http     # HTTP/1.1 parser + types + h2c
 #   amc package add web          # this package
 #
 # See proposal: docs/proposals/amalgame-web.md
@@ -19,16 +22,17 @@
 
 [package]
 name              = "amalgame-web"
-version           = "0.1.0"
+version           = "0.2.0"
 license           = "Apache-2.0"
-description       = "Mosaic — the Amalgame web framework. v0.1: routing + sessions foundation."
-required-amalgame = ">=0.8.30"
+description       = "Mosaic — the Amalgame web framework. v0.2: filesystem routing."
+required-amalgame = ">=0.8.34"
 schema-version    = 1
 
 [stdlib]
-# Multi-class manifest (uses amc v0.8.29 multi-class extension).
-# v0.1 ships routing + sessions; WebApp comes in v0.1.x once
-# language-level first-class function types land.
+# Multi-class manifest. v0.2 keeps the same runtime surface as v0.1;
+# filesystem routing is a build-time tool, not a runtime class. The
+# user-facing routing API (handlers as Closure values, Router.Match)
+# is unchanged.
 classes   = [
     "Router",
     "Route",
