@@ -15,9 +15,25 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        amc-tag: [v0.8.34]
+        amc-tag: [v0.8.35]
     steps:
+      # Check out amalgame-web inside `web/` so the sibling
+      # amalgame-net-http checkout can live next to it (matches the
+      # local-dev layout the test runner falls back to).
       - uses: actions/checkout@v4
+        with:
+          path: web
+
+      # v0.3.0+: tests/router_test.am imports `Amalgame.Net.Http` for
+      # HttpResponse (the typed Closure<WebContext, HttpResponse>
+      # Handler signature). Checkout the sibling repo so the test
+      # runner picks it up via the `$AMALGAME_NET_HTTP` env override
+      # set below.
+      - uses: actions/checkout@v4
+        with:
+          repository: amalgame-lang/amalgame-net-http
+          ref: v0.4.1
+          path: amalgame-net-http
 
       - name: Install system deps
         run: |
@@ -37,4 +53,7 @@ jobs:
           echo "AMC_RUNTIME=$RUNNER_TEMP/amc-install/share/amalgame/runtime" >> $GITHUB_ENV
 
       - name: Run tests
+        working-directory: web
+        env:
+          AMALGAME_NET_HTTP: ${{ github.workspace }}/amalgame-net-http
         run: ./tests/run_tests.sh "$AMC"
