@@ -41,15 +41,43 @@ GREEN='\033[0;32m'; RED='\033[0;31m'; NC='\033[0m'
 echo "Using amc: $AMC"
 cd "$PKG_DIR"
 
-# Build facade.o once
-"$AMC" --lib -o "$BUILD_DIR/facade" facade.am 2>&1 | tail -2
-gcc -O2 -Iruntime -I"$RUNTIME_DIR" -c "$BUILD_DIR/facade.c" -o "$BUILD_DIR/facade.o" 2>&1 | head -5
-[ -s "$BUILD_DIR/facade.o" ] || { echo -e "${RED}facade build failed${NC}"; exit 1; }
+# Locate amalgame-net-http (sibling repo) — needed since v0.3.0
+# because Route.Handler is typed `Closure<WebContext, HttpResponse>`.
+# Resolution order:
+#   1. $AMALGAME_NET_HTTP env override (CI / explicit paths)
+#   2. ~/.amalgame/packages/.../amalgame-net-http/<latest>/  (after `amc package add net-http`)
+#   3. Sibling checkout — ../amalgame-net-http (local dev)
+NETHTTP_DIR=""
+if [ -n "$AMALGAME_NET_HTTP" ] && [ -d "$AMALGAME_NET_HTTP" ]; then
+    NETHTTP_DIR="$AMALGAME_NET_HTTP"
+elif [ -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-net-http" ]; then
+    NETHTTP_DIR="$(ls -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-net-http"/*/ 2>/dev/null | head -1)"
+    NETHTTP_DIR="${NETHTTP_DIR%/}"
+elif [ -d "$PKG_DIR/../amalgame-net-http" ]; then
+    NETHTTP_DIR="$PKG_DIR/../amalgame-net-http"
+fi
+if [ -z "$NETHTTP_DIR" ] || [ ! -f "$NETHTTP_DIR/facade.am" ]; then
+    echo -e "${RED}error: amalgame-net-http not found${NC}"
+    echo "  set AMALGAME_NET_HTTP=<path> or run \`amc package add net-http\`"
+    exit 2
+fi
 
-# Router tests
-"$AMC" -o "$BUILD_DIR/router_test" tests/router_test.am --external facade.am 2>&1 | tail -2
-gcc -O2 -Iruntime -I"$RUNTIME_DIR" "$BUILD_DIR/router_test.c" "$BUILD_DIR/facade.o" \
-    -lgc -lm -lcurl -lz -o "$BUILD_DIR/router_test" 2>&1 | head -5
+# Build amalgame-web facade.o + amalgame-net-http facade.o once.
+"$AMC" --lib -o "$BUILD_DIR/facade" facade.am 2>&1 | tail -2
+gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$RUNTIME_DIR" -c "$BUILD_DIR/facade.c" -o "$BUILD_DIR/facade.o" 2>&1 | head -5
+[ -s "$BUILD_DIR/facade.o" ] || { echo -e "${RED}facade build failed${NC}"; exit 1; }
+"$AMC" --lib -o "$BUILD_DIR/nethttp" "$NETHTTP_DIR/facade.am" 2>&1 | tail -2
+gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$RUNTIME_DIR" -c "$BUILD_DIR/nethttp.c" -o "$BUILD_DIR/nethttp.o" 2>&1 | head -5
+[ -s "$BUILD_DIR/nethttp.o" ] || { echo -e "${RED}nethttp build failed${NC}"; exit 1; }
+
+# Router tests. --external order matters: net-http first so HttpResponse
+# is registered before amalgame-web's facade references it as the typed
+# Closure return type.
+"$AMC" -o "$BUILD_DIR/router_test" tests/router_test.am \
+    --external "$NETHTTP_DIR/facade.am" --external facade.am 2>&1 | tail -2
+gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$RUNTIME_DIR" \
+    "$BUILD_DIR/router_test.c" "$BUILD_DIR/facade.o" "$BUILD_DIR/nethttp.o" \
+    -lgc -lm -lz -o "$BUILD_DIR/router_test" 2>&1 | head -5
 [ -x "$BUILD_DIR/router_test" ] || { echo -e "${RED}router build failed${NC}"; exit 1; }
 
 "$BUILD_DIR/router_test"
