@@ -71,11 +71,11 @@ import Amalgame.String
 public class Route {
     public Method:      string                  // "GET" / "POST" / ...
     public Path:        string                  // "/users/:id"
-    public Handler:     Closure                 // (WebContext) → HttpResponse
+    public Handler:     Closure<WebContext, HttpResponse>   // amc v0.8.35+ typed closure
     public Segments:    List<string>            // pre-split: ["users", ":id"]
     public ParamNames:  List<string>            // [":id" → "id"], for fast match
 
-    public Route(string method, string path, Closure handler) {
+    public Route(string method, string path, Closure<WebContext, HttpResponse> handler) {
         this.Method     = method
         this.Path       = path
         this.Handler    = handler
@@ -96,15 +96,12 @@ public class Route {
         }
     }
 
-    // To invoke the handler, call `route.Handler(ctx)` directly.
-    // The return value's static type at the AM level is currently
-    // unspecified (closures are untyped in v0.8.x — args/result
-    // erased to i64/void* at the C level). User code typically
-    // casts the return to its expected concrete type, e.g.:
+    // Handler is typed as `Closure<WebContext, HttpResponse>` (amc
+    // v0.8.35+). `route.Handler(ctx)` lowers to a typed call that
+    // returns `HttpResponse*` directly — no `i64` round-trip, no
+    // `-Wno-int-conversion` needed at the consumer side:
     //
-    //   let resp = route.Handler(ctx)        // result is i64-erased
-    //
-    // A future typed-Closure language feature will tighten this.
+    //   let resp: HttpResponse = route.Handler(ctx)   // proper pointer
 
     // Split "/users/:id/posts" into ["users", ":id", "posts"].
     // Empty path or "/" → empty list. Leading slash stripped.
@@ -170,16 +167,16 @@ public class Router {
     // WebContext arg and returning whatever the framework should
     // ship back (typically an HttpResponse from amalgame-net-http).
     // Returns the router for chaining.
-    public Router Add(string method, string path, Closure handler) {
+    public Router Add(string method, string path, Closure<WebContext, HttpResponse> handler) {
         this.Routes.Add(new Route(method, path, handler))
         return this
     }
 
-    public Router Get(string path, Closure handler)    { return this.Add("GET", path, handler) }
-    public Router Post(string path, Closure handler)   { return this.Add("POST", path, handler) }
-    public Router Put(string path, Closure handler)    { return this.Add("PUT", path, handler) }
-    public Router Patch(string path, Closure handler)  { return this.Add("PATCH", path, handler) }
-    public Router Delete(string path, Closure handler) { return this.Add("DELETE", path, handler) }
+    public Router Get(string path, Closure<WebContext, HttpResponse> handler)    { return this.Add("GET", path, handler) }
+    public Router Post(string path, Closure<WebContext, HttpResponse> handler)   { return this.Add("POST", path, handler) }
+    public Router Put(string path, Closure<WebContext, HttpResponse> handler)    { return this.Add("PUT", path, handler) }
+    public Router Patch(string path, Closure<WebContext, HttpResponse> handler)  { return this.Add("PATCH", path, handler) }
+    public Router Delete(string path, Closure<WebContext, HttpResponse> handler) { return this.Add("DELETE", path, handler) }
 
     // Match (method, path) against registered routes. Returns null if
     // no route matches, else a RouteMatch with extracted params.
