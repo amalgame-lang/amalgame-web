@@ -1,71 +1,40 @@
-# amalgame-web (Mosaic)
+# amalgame-web (Mosaic runtime library)
 
-The Amalgame web framework. Top layer of the web stack:
+The runtime library half of the **Mosaic** web stack — Router,
+Sessions, WebContext. Pure-Amalgame classes you `import` from your
+code.
 
 ```
 amalgame-tls          (OpenSSL — TLS 1.2/1.3)
-   └── amalgame-net-http   (HTTP/1.1 — parser + client + helpers)
+   └── amalgame-net-http   (HTTP/1.1 + HTTP/2 — parser, client, h2c)
           └── amalgame-web    (this package — Router, Sessions, WebContext)
 ```
 
-## v0.1 — foundation pieces
+The **build tool** (filesystem routing, DEV mode, scaffolding) is
+a separate project: [`amalgame-lang/mosaic`](https://github.com/amalgame-lang/mosaic).
+Install it once via `curl … install.sh | bash`, run from any
+project. amalgame-web stays pure-library.
 
-Focused, working set:
+## What this package ships
 
 - **Router** with `:param` and `*splat` path matching
 - **Route** + **RouteMatch** primitives
 - **Session** + **MemorySessionStore** (dev / test storage)
 - **WebContext** — per-request bag (path params + app state + session)
 
-## v0.2 — filesystem routing (Next.js App Router style)
+## v0.2 / v0.3 — runtime additions coming
 
-Drop `.am` files in `app/`; the build tool wires them into a Router.
-See [`examples/mosaic-fs-demo/`](examples/mosaic-fs-demo/) for a
-working demo served over HTTP/2 (h2c).
+These are all library-side improvements; the build tool's
+filesystem routing already works against today's Router.
 
-```text
-app/index.am          → GET /
-app/about.am          → GET /about
-app/users/[id].am     → GET /users/:id
-app/api/info.am       → GET /api/info  +  POST /api/info
-app/blog/[...slug].am → GET /blog/*slug
-```
-
-Each file declares **one `public class Page`** with HTTP verbs as
-static methods:
-
-```amalgame
-// app/users/[id].am
-import Amalgame.Web
-
-public class Page {
-    public static HttpResponse GET(WebContext ctx) {
-        return HttpResponse.New().Text("user " + ctx.Param("id"))
-    }
-}
-```
-
-Build:
-
-```bash
-tools/mosaic-routes.sh app _routes.am      # scan + glue
-tools/mosaic-build.sh                       # → ./server
-```
-
-`mosaic-routes.sh` concatenates each file into a single `_routes.am`,
-renaming each `class Page` to `<PathPrefix>_Page` so collisions are
-impossible. `mosaic-build.sh` then drives `amc` + `gcc` end-to-end.
-
-## v0.2.x / v0.3 — coming next
-
-- **DEV mode** — `mosaic dev`: file watcher + `app.so` via
-  `gcc -shared -fPIC` + `dlopen` hot-swap so route changes don't
-  need a restart
-- ACME / Let's Encrypt via amalgame-tls
-- Middleware (CSRF, CORS, rate limit, …)
-- JsonFileSessionStore, RedisSessionStore
+- ACME / Let's Encrypt via amalgame-tls (server-side cert
+  provisioning)
+- Middleware (CSRF, CORS, rate limit, …) — needs the function-
+  composition API to stabilise
+- `JsonFileSessionStore`, `RedisSessionStore`
 - Reverse proxy
-- Layout / nested layout files
+- Layout / nested layout files (paired with Mosaic CLI's
+  `app/_layout.am` convention)
 
 ## Install
 
