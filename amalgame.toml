@@ -21,10 +21,10 @@
 
 [package]
 name              = "amalgame-web"
-version           = "0.2.1"
+version           = "0.3.0"
 license           = "Apache-2.0"
 description       = "Mosaic — the Amalgame web framework runtime library."
-required-amalgame = ">=0.8.34"
+required-amalgame = ">=0.8.35"
 schema-version    = 1
 
 [stdlib]

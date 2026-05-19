@@ -5,32 +5,35 @@
 //   - *splat capture
 //   - method filter
 //   - 404 cases
-//   - actual handler invocation via match.Route.Invoke(ctx)
+//   - actual handler invocation via match.Route.Handler(ctx)
 //
-// Requires amc v0.8.30+ for the Closure-as-field-type support.
+// Requires amc v0.8.35+ for the typed-Closure annotation on
+// Router.Handler (Closure<WebContext, HttpResponse>).
 
 namespace Tests
 
 import Amalgame.Collections
 import Amalgame.String
+import Amalgame.Net.Http
 import Amalgame.Web
 
 public class Program {
     public static void Main(string[] args) {
         Console.WriteLine("amalgame-web — Router tests (FCF)")
 
-        // Handlers are real closures. We don't have HttpResponse here
-        // (no net-http dep in this test), so handlers return an int
-        // — easy to assert against.
+        // Handlers return HttpResponse (typed Closure since v0.3.0
+        // — the Handler field is `Closure<WebContext, HttpResponse>`).
+        // We assert against the response's StatusCode to keep checks
+        // int-comparable.
         let r = new Router()
-        r.Get("/",                ctx => 1)
-            .Get("/about",        ctx => 2)
-            .Get("/users",        ctx => 3)
-            .Get("/users/:id",    ctx => 100)
-            .Post("/users",       ctx => 200)
-            .Delete("/users/:id", ctx => 300)
-            .Get("/users/:id/posts/:postId", ctx => 400)
-            .Get("/files/*path",  ctx => 500)
+        r.Get("/",                ctx => HttpResponse.New().Status(1))
+            .Get("/about",        ctx => HttpResponse.New().Status(2))
+            .Get("/users",        ctx => HttpResponse.New().Status(3))
+            .Get("/users/:id",    ctx => HttpResponse.New().Status(100))
+            .Post("/users",       ctx => HttpResponse.New().Status(200))
+            .Delete("/users/:id", ctx => HttpResponse.New().Status(300))
+            .Get("/users/:id/posts/:postId", ctx => HttpResponse.New().Status(400))
+            .Get("/files/*path",  ctx => HttpResponse.New().Status(500))
 
         // ── Static matches ────────────────────────────────────────
         let m1 = r.Match("GET", "/")
@@ -91,7 +94,8 @@ public class Program {
         // Nested member access `m.Route.Handler(ctx)` works directly
         // since amc v0.8.33 (ResolveReceiverClass walks MEMBER chains).
         let ctx = new WebContext()
-        let res1: int = m1.Route.Handler(ctx)
+        let resp1: HttpResponse = m1.Route.Handler(ctx)
+        let res1: int = resp1.StatusCode
         if (res1 == 1) {
             Console.WriteLine("[PASS] handler invoked: / → 1")
         } else {
@@ -99,14 +103,16 @@ public class Program {
         }
 
         ctx.Params = m5.Params
-        let res5: int = m5.Route.Handler(ctx)
+        let resp5: HttpResponse = m5.Route.Handler(ctx)
+        let res5: int = resp5.StatusCode
         if (res5 == 100) {
             Console.WriteLine("[PASS] handler invoked: /users/:id → 100")
         } else {
             Console.WriteLine("[FAIL] handler invoked /users/:id got " + String_FromInt(res5))
         }
 
-        let res7: int = m7.Route.Handler(ctx)
+        let resp7: HttpResponse = m7.Route.Handler(ctx)
+        let res7: int = resp7.StatusCode
         if (res7 == 400) {
             Console.WriteLine("[PASS] handler invoked: two :params → 400")
         } else {
