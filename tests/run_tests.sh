@@ -63,23 +63,32 @@ if [ -z "$NETHTTP_DIR" ] || [ ! -f "$NETHTTP_DIR/facade.am" ]; then
 fi
 
 # Build amalgame-web facade.o + amalgame-net-http facade.o once.
-"$AMC" --lib -o "$BUILD_DIR/facade" facade.am 2>&1 | tail -2
-gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$RUNTIME_DIR" -c "$BUILD_DIR/facade.c" -o "$BUILD_DIR/facade.o" 2>&1 | head -5
-[ -s "$BUILD_DIR/facade.o" ] || { echo -e "${RED}facade build failed${NC}"; exit 1; }
+# net-http first (no deps), then web with --external pointing at it
+# so SecurityHeaders.Apply(HttpResponse) can resolve the return type.
 "$AMC" --lib -o "$BUILD_DIR/nethttp" "$NETHTTP_DIR/facade.am" 2>&1 | tail -2
 gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$RUNTIME_DIR" -c "$BUILD_DIR/nethttp.c" -o "$BUILD_DIR/nethttp.o" 2>&1 | head -5
 [ -s "$BUILD_DIR/nethttp.o" ] || { echo -e "${RED}nethttp build failed${NC}"; exit 1; }
+"$AMC" --lib -o "$BUILD_DIR/facade" facade.am --external "$NETHTTP_DIR/facade.am" 2>&1 | tail -2
+gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$RUNTIME_DIR" -c "$BUILD_DIR/facade.c" -o "$BUILD_DIR/facade.o" 2>&1 | head -5
+[ -s "$BUILD_DIR/facade.o" ] || { echo -e "${RED}facade build failed${NC}"; exit 1; }
 
-# Router tests. --external order matters: net-http first so HttpResponse
-# is registered before amalgame-web's facade references it as the typed
-# Closure return type.
-"$AMC" -o "$BUILD_DIR/router_test" tests/router_test.am \
-    --external "$NETHTTP_DIR/facade.am" --external facade.am 2>&1 | tail -2
-gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$RUNTIME_DIR" \
-    "$BUILD_DIR/router_test.c" "$BUILD_DIR/facade.o" "$BUILD_DIR/nethttp.o" \
-    -lgc -lm -lz -o "$BUILD_DIR/router_test" 2>&1 | head -5
-[ -x "$BUILD_DIR/router_test" ] || { echo -e "${RED}router build failed${NC}"; exit 1; }
+# Build + run one test file. --external order matters: net-http first
+# so HttpResponse is registered before amalgame-web's facade references
+# it as the typed Closure return type.
+build_and_run() {
+    local name="$1"
+    local src="$2"
+    echo -e "\n── ${name} ──"
+    "$AMC" -o "$BUILD_DIR/$name" "$src" \
+        --external "$NETHTTP_DIR/facade.am" --external facade.am 2>&1 | tail -2
+    gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$RUNTIME_DIR" \
+        "$BUILD_DIR/$name.c" "$BUILD_DIR/facade.o" "$BUILD_DIR/nethttp.o" \
+        -lgc -lm -lz -o "$BUILD_DIR/$name" 2>&1 | head -5
+    [ -x "$BUILD_DIR/$name" ] || { echo -e "${RED}${name} build failed${NC}"; exit 1; }
+    "$BUILD_DIR/$name"
+}
 
-"$BUILD_DIR/router_test"
+build_and_run router_test           tests/router_test.am
+build_and_run security_headers_test tests/security_headers_test.am
 
 echo -e "\n${GREEN}All tests completed${NC}"
