@@ -108,7 +108,17 @@ gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"
 "$AMC" --lib -o "$BUILD_DIR/random" "$RANDOM_DIR/facade.am" 2>&1 | tail -2
 gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/random.c" -o "$BUILD_DIR/random.o" 2>&1 | head -5
 [ -s "$BUILD_DIR/random.o" ] || { echo -e "${RED}random build failed${NC}"; exit 1; }
-"$AMC" --lib -o "$BUILD_DIR/facade" facade.am \
+# v0.7.x: amalgame-web is split across multiple .am files
+# (facade.am + sources from amalgame.toml). The compiler treats
+# them all as the same package; we just have to pass each one to
+# both the lib build and the test --external chain.
+WEB_SOURCES="facade.am session.am web_context.am security_headers.am cors.am rate_limit.am csrf.am"
+WEB_EXTERNAL_FLAGS=""
+for src in $WEB_SOURCES; do
+    WEB_EXTERNAL_FLAGS="$WEB_EXTERNAL_FLAGS --external $src"
+done
+
+"$AMC" --lib -o "$BUILD_DIR/facade" $WEB_SOURCES \
     --external "$NETHTTP_DIR/facade.am" \
     --external "$DATETIME_DIR/facade.am" \
     --external "$RANDOM_DIR/facade.am" 2>&1 | tail -2
@@ -117,7 +127,8 @@ gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"
 
 # Build + run one test file. --external order matters: net-http first
 # so HttpResponse is registered before amalgame-web's facade references
-# it as the typed Closure return type.
+# it as the typed Closure return type. amalgame-web's own files come
+# last so cross-file refs (e.g. WebContext.Session → session.am) resolve.
 build_and_run() {
     local name="$1"
     local src="$2"
@@ -126,7 +137,7 @@ build_and_run() {
         --external "$NETHTTP_DIR/facade.am" \
         --external "$DATETIME_DIR/facade.am" \
         --external "$RANDOM_DIR/facade.am" \
-        --external facade.am 2>&1 | tail -2
+        $WEB_EXTERNAL_FLAGS 2>&1 | tail -2
     gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$RUNTIME_DIR" \
         "$BUILD_DIR/$name.c" "$BUILD_DIR/facade.o" "$BUILD_DIR/nethttp.o" "$BUILD_DIR/datetime.o" "$BUILD_DIR/random.o" \
         -lgc -lm -lz -o "$BUILD_DIR/$name" 2>&1 | head -5

@@ -25,7 +25,7 @@
 
 [package]
 name              = "amalgame-web"
-version           = "0.7.0"
+version           = "0.7.1"
 license           = "Apache-2.0"
 description       = "Mosaic — the Amalgame web framework runtime library."
 required-amalgame = ">=0.8.35"
@@ -48,4 +48,16 @@ classes   = [
 header    = "runtime/Amalgame_Web.h"
 namespace = "Amalgame.Web"
 facade    = "facade.am"
+# Multi-file split (v0.7.x). facade.am holds the routing core
+# (Route / RouteMatch / Router); each middleware lives in its own
+# source. Order matters for cross-file references: session.am
+# before web_context.am (WebContext.Session field), and so on.
+sources   = [
+    "session.am",
+    "web_context.am",
+    "security_headers.am",
+    "cors.am",
+    "rate_limit.am",
+    "csrf.am",
+]
 libs      = []
