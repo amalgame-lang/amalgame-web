@@ -48,6 +48,12 @@ project. amalgame-web stays pure-library.
   `[logging]` TOML table into `amalgame-logging`. Sets the
   process-wide level + file sink at startup; emits a one-liner
   per request at INFO level when `access_log = true`.
+- **SignedCookieSessionStore** (v0.8.3) — stateless sessions
+  signed with HMAC-SHA-256 via `amalgame-crypto`. No server-side
+  storage — the cookie value IS the session payload. Default of
+  Rails/Flask/Phoenix; zero ops for new apps. Signed-only in v0.1
+  (data visible but tamper-proof) — AEAD encryption arrives with
+  amalgame-crypto v0.2.
 
 ## Roadmap
 
@@ -62,6 +68,7 @@ amc package add net-http     # HTTP parser + types
 amc package add datetime     # for RateLimit (monotonic clock)
 amc package add random       # for Csrf (crypto entropy)
 amc package add logging      # for LogConfig + access logs
+amc package add crypto       # for SignedCookieSessionStore (HMAC)
 amc package add web          # this package
 ```
 
