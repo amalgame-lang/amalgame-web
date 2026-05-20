@@ -16,6 +16,19 @@ jobs:
       fail-fast: false
       matrix:
         amc-tag: [v0.8.35]
+    services:
+      # v0.8.4+: redis_session_test exercises RedisSessionStore
+      # against a live RESP2 server. The test SKIPs cleanly when no
+      # server is reachable, but in CI we want the live path covered.
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
     steps:
       # Check out amalgame-web inside `web/` so the sibling
       # amalgame-net-http checkout can live next to it (matches the
@@ -65,6 +78,15 @@ jobs:
           ref: v0.1.0
           path: amalgame-crypto
 
+      # v0.8.4+: RedisSessionStore uses amalgame-database-nosql-redis
+      # (C-only package consumed via AMALGAME_PACKAGES_DIR + a
+      # transient amalgame.lock — wired in tests/run_tests.sh).
+      - uses: actions/checkout@v4
+        with:
+          repository: amalgame-lang/amalgame-database-nosql-redis
+          ref: v0.3.0
+          path: amalgame-database-nosql-redis
+
       - name: Install system deps
         run: |
           sudo apt-get update -qq
@@ -90,4 +112,5 @@ jobs:
           AMALGAME_RANDOM:   ${{ github.workspace }}/amalgame-random
           AMALGAME_LOGGING:  ${{ github.workspace }}/amalgame-logging
           AMALGAME_CRYPTO:   ${{ github.workspace }}/amalgame-crypto
+          AMALGAME_DB_REDIS: ${{ github.workspace }}/amalgame-database-nosql-redis
         run: ./tests/run_tests.sh "$AMC"

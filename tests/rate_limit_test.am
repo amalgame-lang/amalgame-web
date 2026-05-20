@@ -16,6 +16,7 @@ import Amalgame.String
 import Amalgame.DateTime
 import Amalgame.Net.Http
 import Amalgame.Web
+import Amalgame.Database.NoSQL.Redis
 
 public class Program {
     public static void Main(string[] args) {
@@ -154,6 +155,80 @@ public class Program {
             Console.WriteLine("[PASS] FromMap enabled=false → Disabled")
         } else {
             Console.WriteLine("[FAIL] FromMap enabled=false leaked")
+        }
+
+        // ── 11. FromMap — backend=redis composes ─────────────────
+        let cfg4 = new Map<string, string>()
+        cfg4.Set("rps", "10")
+        cfg4.Set("backend", "redis")
+        cfg4.Set("redis_host", "127.0.0.1")
+        cfg4.Set("redis_port", "6379")
+        cfg4.Set("redis_key_prefix", "myapp:rl")
+        let r11 = RateLimit.FromMap(cfg4)
+        if (r11.Backend == "redis"
+            && r11.RedisHost == "127.0.0.1"
+            && r11.RedisPort == 6379
+            && r11.RedisKeyPrefix == "myapp:rl"
+            && r11.MaxRequests == 10) {
+            Console.WriteLine("[PASS] FromMap backend=redis composes")
+        } else {
+            Console.WriteLine("[FAIL] FromMap redis attrs wrong")
+        }
+
+        // ── 12. Redis backend — live throttle test ───────────────
+        // Same fixed-window semantics as memory: N allowed, N+1 → 429.
+        // SKIP cleanly when no Redis on 127.0.0.1:6379.
+        let rlRedis = RateLimit.PerIp(3, 60)
+            .WithBackend("redis")
+            .WithRedisKeyPrefix("amctest:rl")
+        if (!rlRedis.Probe()) {
+            Console.WriteLine("[SKIP] Redis backend — no server on 127.0.0.1:6379")
+        } else {
+            // Pre-clean any leftover key from a previous run.
+            let cleanup = Redis.Open(rlRedis.RedisHost, rlRedis.RedisPort)
+            Redis.Del(cleanup, "amctest:rl:192.0.2.99")
+            Redis.Close(cleanup)
+
+            let reqR = new HttpRequest()
+            reqR.RemoteAddr = "192.0.2.99:1234"
+            var allowedR: int = 0
+            var k: int = 0
+            while (k < 5) {
+                let resp: HttpResponse = rlRedis.Check(reqR)
+                if (resp == null) { allowedR = allowedR + 1 }
+                k = k + 1
+            }
+            if (allowedR == 3) {
+                Console.WriteLine("[PASS] Redis backend throttles after MaxRequests")
+            } else {
+                Console.WriteLine("[FAIL] Redis allowed " + String_FromInt(allowedR) + " (expected 3)")
+            }
+
+            let lastResp: HttpResponse = rlRedis.Check(reqR)
+            if (lastResp != null && lastResp.StatusCode == 429 && lastResp.Headers.Has("Retry-After")) {
+                Console.WriteLine("[PASS] Redis 429 + Retry-After")
+            } else {
+                Console.WriteLine("[FAIL] Redis 429 shape wrong")
+            }
+
+            // Per-key isolation on the Redis backend.
+            let reqR2 = new HttpRequest()
+            reqR2.RemoteAddr = "192.0.2.100:5678"
+            let cleanup2 = Redis.Open(rlRedis.RedisHost, rlRedis.RedisPort)
+            Redis.Del(cleanup2, "amctest:rl:192.0.2.100")
+            Redis.Close(cleanup2)
+            let respIso: HttpResponse = rlRedis.Check(reqR2)
+            if (respIso == null) {
+                Console.WriteLine("[PASS] Redis per-key isolation")
+            } else {
+                Console.WriteLine("[FAIL] Redis bled across keys")
+            }
+
+            // Final cleanup.
+            let cleanup3 = Redis.Open(rlRedis.RedisHost, rlRedis.RedisPort)
+            Redis.Del(cleanup3, "amctest:rl:192.0.2.99")
+            Redis.Del(cleanup3, "amctest:rl:192.0.2.100")
+            Redis.Close(cleanup3)
         }
 
         Console.WriteLine("done")

@@ -1,0 +1,236 @@
+// amalgame-web — RedisSessionStore (v0.8.4).
+//
+// Server-side session store backed by Redis. Pattern matches
+// MemorySessionStore but persists each Session.Data map as one
+// Redis string per session, keyed `<prefix>:<session_id>`, with a
+// TTL refreshed on Save.
+//
+// Why Redis (vs memory/shm):
+//   - memory: single process, lost on restart, no horizontal scale
+//   - shm:    multi-worker single node, lost on restart
+//   - redis:  multi-node, survives restarts, the canonical choice
+//             once you're past single-machine
+//
+// Payload format (same as SignedCookieSessionStore):
+//   "k1=v1&k2=v2&..."   (plain ASCII; '&' and '=' forbidden in
+//                        keys + values for v0.1 — JSON in v0.2)
+//
+// Connection model (v0.1): one TCP connection per operation —
+// Open + op + Close. Trivially correct; no shared state to
+// invalidate on a dropped socket. The amc type system can't store
+// an opaque C handle (AmalgameRedis*) in an AM class field today,
+// so connection pooling has to wait until either the language
+// gains an opaque-handle escape hatch or this store moves into
+// the redis package itself. localhost TCP setup costs ~50µs, so
+// the penalty is real but bearable until we're scaling.
+//
+// Lifecycle:
+//   Create(id) → empty Session, immediately persisted to Redis
+//                with TTL = MaxAgeSec
+//   Find(id)   → fetched from Redis, deserialised, or null
+//   Save(s)    → serialise + SET + EXPIRE — caller invokes this
+//                after mutating s.Data. (The framework should hook
+//                this into the response phase; not automatic yet.)
+//   Destroy(id) → DEL
+
+namespace Amalgame.Web
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.Database.NoSQL.Redis
+
+public class RedisSessionStore {
+    public Host:           string
+    public Port:           int
+    public KeyPrefix:      string
+    public CookieName:     string
+    public CookieSecure:   bool
+    public CookieSameSite: string
+    public CookiePath:     string
+    public CookieMaxAge:   int
+    public MaxAgeSec:      int           // TTL applied to each session
+
+    public RedisSessionStore() {
+        this.Host           = "127.0.0.1"
+        this.Port           = 6379
+        this.KeyPrefix      = "mosaic:session"
+        this.CookieName     = "mosaic_session"
+        this.CookieSecure   = true
+        this.CookieSameSite = "Lax"
+        this.CookiePath     = "/"
+        this.CookieMaxAge   = 0
+        this.MaxAgeSec      = 86400
+    }
+
+    // ── Builders ─────────────────────────────────────
+    public RedisSessionStore WithHost(string h)              { this.Host           = h; return this }
+    public RedisSessionStore WithPort(int p)                 { this.Port           = p; return this }
+    public RedisSessionStore WithKeyPrefix(string p)         { this.KeyPrefix      = p; return this }
+    public RedisSessionStore WithCookieName(string n)        { this.CookieName     = n; return this }
+    public RedisSessionStore WithCookieSecure(bool s)        { this.CookieSecure   = s; return this }
+    public RedisSessionStore WithCookieSameSite(string ss)   { this.CookieSameSite = ss; return this }
+    public RedisSessionStore WithCookiePath(string p)        { this.CookiePath     = p; return this }
+    public RedisSessionStore WithCookieMaxAge(int a)         { this.CookieMaxAge   = a; return this }
+    public RedisSessionStore WithMaxAgeSec(int a)            { this.MaxAgeSec      = a; return this }
+
+    // ── Connectivity probe ───────────────────────────
+    // Opens, pings, closes. Returns true if the server answered.
+    // Use this at startup to fail fast on a missing Redis, OR in
+    // tests to gate the suite when no server is up.
+    public bool Probe() {
+        let h = Redis.Open(this.Host, this.Port)
+        if (!Redis.IsOpen(h)) {
+            Redis.Close(h)
+            return false
+        }
+        let ok: bool = Redis.Ping(h)
+        Redis.Close(h)
+        return ok
+    }
+
+    // ── Cookie helper ────────────────────────────────
+    public Cookie MakeCookie(string sessionId) {
+        let c = new Cookie()
+        c.Name      = this.CookieName
+        c.Value     = sessionId
+        c.Path      = this.CookiePath
+        c.Secure    = this.CookieSecure
+        c.SameSite  = this.CookieSameSite
+        c.MaxAgeSec = this.CookieMaxAge
+        c.HttpOnly  = true
+        return c
+    }
+
+    // ── Session lifecycle ────────────────────────────
+    // Create + persist an empty Session with the given id. Caller
+    // typically passes a Router-generated 256-bit random token.
+    public Session Create(string id) {
+        let s = new Session(id)
+        s.MaxAgeSec = this.MaxAgeSec
+        this.Save(s)
+        return s
+    }
+
+    // Look up a session by id. Returns null if Redis is down or
+    // the key is missing.
+    public Session Find(string id) {
+        let h = Redis.Open(this.Host, this.Port)
+        if (!Redis.IsOpen(h)) {
+            Redis.Close(h)
+            return null
+        }
+        let key: string = this.KeyPrefix + ":" + id
+        if (!Redis.Exists(h, key)) {
+            Redis.Close(h)
+            return null
+        }
+        let raw: string = Redis.Get(h, key)
+        Redis.Close(h)
+        let session = new Session(id)
+        session.MaxAgeSec = this.MaxAgeSec
+        session.Data = RedisSessionStore.DeserializeData(raw)
+        return session
+    }
+
+    // Serialise + write the session to Redis with the configured
+    // TTL. Returns false on connection or write failure.
+    public bool Save(Session s) {
+        let h = Redis.Open(this.Host, this.Port)
+        if (!Redis.IsOpen(h)) {
+            Redis.Close(h)
+            return false
+        }
+        let key: string = this.KeyPrefix + ":" + s.Id
+        let payload: string = RedisSessionStore.SerializeData(s.Data)
+        let setOk: bool = Redis.Set(h, key, payload)
+        if (setOk && this.MaxAgeSec > 0) {
+            Redis.Expire(h, key, this.MaxAgeSec)
+        }
+        Redis.Close(h)
+        return setOk
+    }
+
+    // Remove a session. No-op if Redis is down.
+    public void Destroy(string id) {
+        let h = Redis.Open(this.Host, this.Port)
+        if (!Redis.IsOpen(h)) {
+            Redis.Close(h)
+            return
+        }
+        let key: string = this.KeyPrefix + ":" + id
+        Redis.Del(h, key)
+        Redis.Close(h)
+    }
+
+    // ── FromMap — for the [sessions] TOML table when ─
+    // strategy = "server_side" + backend = "redis". Recognised keys:
+    //   host             string  (default 127.0.0.1)
+    //   port             int     (default 6379)
+    //   key_prefix       string  (default "mosaic:session")
+    //   max_age_sec      int     (default 86400)
+    //   cookie_name / cookie_secure / cookie_samesite /
+    //   cookie_path / cookie_max_age — same as MemorySessionStore
+    public static RedisSessionStore FromMap(Map<string, string> cfg) {
+        let s = new RedisSessionStore()
+        if (cfg.Has("host"))            { s.Host           = cfg.Get("host") }
+        if (cfg.Has("port"))            { s.Port           = String_ToInt(cfg.Get("port")) }
+        if (cfg.Has("key_prefix"))      { s.KeyPrefix      = cfg.Get("key_prefix") }
+        if (cfg.Has("max_age_sec"))     { s.MaxAgeSec      = String_ToInt(cfg.Get("max_age_sec")) }
+        if (cfg.Has("cookie_name"))     { s.CookieName     = cfg.Get("cookie_name") }
+        if (cfg.Has("cookie_secure"))   { s.CookieSecure   = (cfg.Get("cookie_secure") == "true") }
+        if (cfg.Has("cookie_samesite")) { s.CookieSameSite = cfg.Get("cookie_samesite") }
+        if (cfg.Has("cookie_path"))     { s.CookiePath     = cfg.Get("cookie_path") }
+        if (cfg.Has("cookie_max_age"))  { s.CookieMaxAge   = String_ToInt(cfg.Get("cookie_max_age")) }
+        return s
+    }
+
+    // ── Internal: payload serialisation ──────────────
+    // Same wire format as SignedCookieSessionStore so future code
+    // can swap freely. Keys + values must not contain '&' or '='.
+    private static string SerializeData(Map<string, string> d) {
+        var s: string = ""
+        let keys: List<string> = d.Keys()
+        let n: int = keys.Count()
+        for i in 0..n {
+            let k: string = keys.Get(i)
+            let v: string = d.Get(k)
+            if (i > 0) { s = s + "&" }
+            s = s + k + "=" + v
+        }
+        return s
+    }
+
+    private static Map<string, string> DeserializeData(string raw) {
+        let m: Map<string, string> = new Map<string, string>()
+        let n: int = String_Length(raw)
+        if (n == 0) { return m }
+        var start: int = 0
+        var i: int = 0
+        while (i <= n) {
+            let isEnd: bool = (i == n)
+            var sep: bool = false
+            if (!isEnd) {
+                let c: string = String_CharAt1(raw, i)
+                if (c == "&") { sep = true }
+            }
+            if (isEnd || sep) {
+                let pair: string = String_Substring(raw, start, i - start)
+                let pn: int = String_Length(pair)
+                var eq: int = -1
+                var j: int = 0
+                while (j < pn) {
+                    if (String_CharAt1(pair, j) == "=") { eq = j; j = pn }
+                    else { j = j + 1 }
+                }
+                if (eq > 0 && eq < pn) {
+                    let k: string = String_Substring(pair, 0, eq)
+                    let v: string = String_Substring(pair, eq + 1, pn - eq - 1)
+                    m.Set(k, v)
+                }
+                start = i + 1
+            }
+            i = i + 1
+        }
+        return m
+    }
+}
