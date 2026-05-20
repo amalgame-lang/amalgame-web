@@ -32,8 +32,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: amalgame-lang/amalgame-net-http
-          ref: v0.4.1
+          ref: v0.4.2
           path: amalgame-net-http
+
+      # v0.6.0+: RateLimit uses `DateTime.NowMonotonicNanos()` from
+      # amalgame-datetime. Same sibling-checkout pattern.
+      - uses: actions/checkout@v4
+        with:
+          repository: amalgame-lang/amalgame-datetime
+          ref: v0.1.0
+          path: amalgame-datetime
 
       - name: Install system deps
         run: |
@@ -56,4 +64,5 @@ jobs:
         working-directory: web
         env:
           AMALGAME_NET_HTTP: ${{ github.workspace }}/amalgame-net-http
+          AMALGAME_DATETIME: ${{ github.workspace }}/amalgame-datetime
         run: ./tests/run_tests.sh "$AMC"
