@@ -1,0 +1,128 @@
+// Unit tests for AcmeConfig (v0.10.0).
+//
+// Pure-config class — no certbot subprocess invoked here. Verifies
+// builder semantics, FromMap parsing, path computation, validation.
+
+namespace Tests
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.Net.Http
+import Amalgame.Web
+
+public class Program {
+    public static void Main(string[] args) {
+        Console.WriteLine("amalgame-web — AcmeConfig tests")
+
+        // ── 1. Defaults ──────────────────────────────────────────
+        let a = new AcmeConfig()
+        if (!a.Enabled
+            && a.Domain == ""
+            && a.Email == ""
+            && a.CertDir == "./certs"
+            && a.AcmeServer == ""
+            && a.CertbotPath == "") {
+            Console.WriteLine("[PASS] defaults")
+        } else {
+            Console.WriteLine("[FAIL] defaults wrong")
+        }
+
+        // ── 2. Builders compose ──────────────────────────────────
+        let b = new AcmeConfig()
+            .WithEnabled(true)
+            .WithDomain("example.com")
+            .WithEmail("ops@example.com")
+            .WithCertDir("/etc/mosaic/certs")
+            .WithAcmeServer("https://acme-staging-v02.api.letsencrypt.org/directory")
+            .WithCertbotPath("/opt/certbot/bin/certbot")
+        if (b.Enabled
+            && b.Domain == "example.com"
+            && b.Email == "ops@example.com"
+            && b.CertDir == "/etc/mosaic/certs"
+            && b.AcmeServer == "https://acme-staging-v02.api.letsencrypt.org/directory"
+            && b.CertbotPath == "/opt/certbot/bin/certbot") {
+            Console.WriteLine("[PASS] builders compose")
+        } else {
+            Console.WriteLine("[FAIL] builders broken")
+        }
+
+        // ── 3. Path computation ──────────────────────────────────
+        let p = new AcmeConfig()
+            .WithDomain("api.example.com")
+            .WithCertDir("/var/certs")
+        if (p.CertPath() == "/var/certs/api.example.com/fullchain.pem"
+            && p.KeyPath()  == "/var/certs/api.example.com/privkey.pem") {
+            Console.WriteLine("[PASS] cert/key paths")
+        } else {
+            Console.WriteLine("[FAIL] paths: " + p.CertPath() + " | " + p.KeyPath())
+        }
+
+        // ── 4. Validate — disabled is always OK ──────────────────
+        let off = new AcmeConfig()
+        if (off.Validate() == "") {
+            Console.WriteLine("[PASS] disabled validates clean")
+        } else {
+            Console.WriteLine("[FAIL] disabled flagged: " + off.Validate())
+        }
+
+        // ── 5. Validate — enabled + empty domain → error ─────────
+        let bad1 = new AcmeConfig().WithEnabled(true).WithEmail("o@x.com")
+        if (String_Contains(bad1.Validate(), "domain")) {
+            Console.WriteLine("[PASS] missing-domain detected")
+        } else {
+            Console.WriteLine("[FAIL] missing domain accepted: '" + bad1.Validate() + "'")
+        }
+
+        // ── 6. Validate — enabled + empty email → error ──────────
+        let bad2 = new AcmeConfig().WithEnabled(true).WithDomain("x.com")
+        if (String_Contains(bad2.Validate(), "email")) {
+            Console.WriteLine("[PASS] missing-email detected")
+        } else {
+            Console.WriteLine("[FAIL] missing email accepted: '" + bad2.Validate() + "'")
+        }
+
+        // ── 7. Validate — fully configured passes ────────────────
+        let good = new AcmeConfig()
+            .WithEnabled(true)
+            .WithDomain("x.com")
+            .WithEmail("o@x.com")
+        if (good.Validate() == "") {
+            Console.WriteLine("[PASS] full config validates")
+        } else {
+            Console.WriteLine("[FAIL] full config rejected: " + good.Validate())
+        }
+
+        // ── 8. FromMap — all keys ────────────────────────────────
+        let cfg = new Map<string, string>()
+        cfg.Set("enabled", "true")
+        cfg.Set("domain", "fm.example.com")
+        cfg.Set("email", "fm@example.com")
+        cfg.Set("cert_dir", "/data/certs")
+        cfg.Set("acme_server", "https://buypass.com/acme/directory")
+        cfg.Set("certbot_path", "/usr/local/bin/certbot")
+        let m = AcmeConfig.FromMap(cfg)
+        if (m.Enabled
+            && m.Domain == "fm.example.com"
+            && m.Email == "fm@example.com"
+            && m.CertDir == "/data/certs"
+            && m.AcmeServer == "https://buypass.com/acme/directory"
+            && m.CertbotPath == "/usr/local/bin/certbot") {
+            Console.WriteLine("[PASS] FromMap composes attrs")
+        } else {
+            Console.WriteLine("[FAIL] FromMap broken")
+        }
+
+        // ── 9. FromMap — enabled=false explicit ──────────────────
+        let cfgOff = new Map<string, string>()
+        cfgOff.Set("enabled", "false")
+        cfgOff.Set("domain", "ignored.example.com")
+        let m2 = AcmeConfig.FromMap(cfgOff)
+        if (!m2.Enabled && m2.Domain == "ignored.example.com") {
+            Console.WriteLine("[PASS] FromMap enabled=false honored")
+        } else {
+            Console.WriteLine("[FAIL] FromMap enabled flag")
+        }
+
+        Console.WriteLine("done")
+    }
+}
