@@ -62,14 +62,37 @@ if [ -z "$NETHTTP_DIR" ] || [ ! -f "$NETHTTP_DIR/facade.am" ]; then
     exit 2
 fi
 
-# Build amalgame-web facade.o + amalgame-net-http facade.o once.
-# net-http first (no deps), then web with --external pointing at it
-# so SecurityHeaders.Apply(HttpResponse) can resolve the return type.
+# Locate amalgame-datetime (used by RateLimit since v0.6.0). Same
+# resolution order as net-http.
+DATETIME_DIR=""
+if [ -n "$AMALGAME_DATETIME" ] && [ -d "$AMALGAME_DATETIME" ]; then
+    DATETIME_DIR="$AMALGAME_DATETIME"
+elif [ -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-datetime" ]; then
+    DATETIME_DIR="$(ls -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-datetime"/*/ 2>/dev/null | head -1)"
+    DATETIME_DIR="${DATETIME_DIR%/}"
+elif [ -d "$PKG_DIR/../amalgame-datetime" ]; then
+    DATETIME_DIR="$PKG_DIR/../amalgame-datetime"
+fi
+if [ -z "$DATETIME_DIR" ] || [ ! -f "$DATETIME_DIR/facade.am" ]; then
+    echo -e "${RED}error: amalgame-datetime not found${NC}"
+    echo "  set AMALGAME_DATETIME=<path> or run \`amc package add datetime\`"
+    exit 2
+fi
+
+# Build sibling facade .o files once, then amalgame-web's own.
+# Order matters: net-http and datetime have no inter-dep; web
+# depends on both. --external on the web build wires the types
+# (HttpResponse from net-http, DateTime from datetime).
 "$AMC" --lib -o "$BUILD_DIR/nethttp" "$NETHTTP_DIR/facade.am" 2>&1 | tail -2
-gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$RUNTIME_DIR" -c "$BUILD_DIR/nethttp.c" -o "$BUILD_DIR/nethttp.o" 2>&1 | head -5
+gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/nethttp.c" -o "$BUILD_DIR/nethttp.o" 2>&1 | head -5
 [ -s "$BUILD_DIR/nethttp.o" ] || { echo -e "${RED}nethttp build failed${NC}"; exit 1; }
-"$AMC" --lib -o "$BUILD_DIR/facade" facade.am --external "$NETHTTP_DIR/facade.am" 2>&1 | tail -2
-gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$RUNTIME_DIR" -c "$BUILD_DIR/facade.c" -o "$BUILD_DIR/facade.o" 2>&1 | head -5
+"$AMC" --lib -o "$BUILD_DIR/datetime" "$DATETIME_DIR/facade.am" 2>&1 | tail -2
+gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/datetime.c" -o "$BUILD_DIR/datetime.o" 2>&1 | head -5
+[ -s "$BUILD_DIR/datetime.o" ] || { echo -e "${RED}datetime build failed${NC}"; exit 1; }
+"$AMC" --lib -o "$BUILD_DIR/facade" facade.am \
+    --external "$NETHTTP_DIR/facade.am" \
+    --external "$DATETIME_DIR/facade.am" 2>&1 | tail -2
+gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/facade.c" -o "$BUILD_DIR/facade.o" 2>&1 | head -5
 [ -s "$BUILD_DIR/facade.o" ] || { echo -e "${RED}facade build failed${NC}"; exit 1; }
 
 # Build + run one test file. --external order matters: net-http first
@@ -80,9 +103,11 @@ build_and_run() {
     local src="$2"
     echo -e "\n── ${name} ──"
     "$AMC" -o "$BUILD_DIR/$name" "$src" \
-        --external "$NETHTTP_DIR/facade.am" --external facade.am 2>&1 | tail -2
-    gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$RUNTIME_DIR" \
-        "$BUILD_DIR/$name.c" "$BUILD_DIR/facade.o" "$BUILD_DIR/nethttp.o" \
+        --external "$NETHTTP_DIR/facade.am" \
+        --external "$DATETIME_DIR/facade.am" \
+        --external facade.am 2>&1 | tail -2
+    gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RUNTIME_DIR" \
+        "$BUILD_DIR/$name.c" "$BUILD_DIR/facade.o" "$BUILD_DIR/nethttp.o" "$BUILD_DIR/datetime.o" \
         -lgc -lm -lz -o "$BUILD_DIR/$name" 2>&1 | head -5
     [ -x "$BUILD_DIR/$name" ] || { echo -e "${RED}${name} build failed${NC}"; exit 1; }
     "$BUILD_DIR/$name"
@@ -91,5 +116,6 @@ build_and_run() {
 build_and_run router_test           tests/router_test.am
 build_and_run security_headers_test tests/security_headers_test.am
 build_and_run cors_test             tests/cors_test.am
+build_and_run rate_limit_test       tests/rate_limit_test.am
 
 echo -e "\n${GREEN}All tests completed${NC}"

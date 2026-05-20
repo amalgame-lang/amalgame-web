@@ -67,6 +67,7 @@ namespace Amalgame.Web
 
 import Amalgame.Collections
 import Amalgame.String
+import Amalgame.DateTime
 
 // ─────────────────────────────────────────────────────────────────
 // Route — one registered route.
@@ -755,5 +756,184 @@ public class Cors {
             result.Add(String_Trim(String_Substring(csv, start, n - start)))
         }
         return result
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// RateLimitBucket — per-key window state. Internal to RateLimit but
+// public so the user can inspect or pre-seed the store from tests.
+// ─────────────────────────────────────────────────────────────────
+
+public class RateLimitBucket {
+    public Count:            int     // requests counted in the current window
+    public WindowStartNanos: int     // monotonic-nanos of window start
+
+    public RateLimitBucket() {
+        this.Count = 0
+        this.WindowStartNanos = 0
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// RateLimit — fixed-window per-key throttle (v0.6.0).
+//
+// Counts requests per `KeyStrategy` per `WindowNanos` window. When
+// a key exceeds `MaxRequests`, `Check(req)` returns a 429 response
+// (caller short-circuits dispatch). Otherwise it returns null and
+// the request proceeds.
+//
+// Fixed-window algorithm: simple, predictable, has a known
+// "double-burst at boundary" property (briefly 2× rate when a
+// burst straddles two windows). For Mosaic v1 this is acceptable;
+// v2 will offer sliding-window / token-bucket variants.
+//
+// Time source: `DateTime.NowMonotonicNanos()` from amalgame-datetime
+// (monotonic, immune to NTP slews and DST jumps).
+//
+// Keys today:
+//   "ip"   — req.RemoteAddr stripped of port, e.g. "192.0.2.1"
+//
+// Trusted proxies + X-Forwarded-For honoring is planned for v2.
+//
+// Usage:
+//
+//     let rl = RateLimit.PerIp(100, 60)        // 100 req / 60 s / IP
+//     // in dispatch:
+//     let limited: HttpResponse = rl.Check(req)
+//     if (limited != null) {
+//         TcpConn_Send(conn, limited.Render())
+//         continue                              // skip the handler
+//     }
+//     let resp = route.Handler(ctx)
+//     ...
+// ─────────────────────────────────────────────────────────────────
+
+public class RateLimit {
+    public MaxRequests:  int
+    public WindowNanos:  int
+    public KeyStrategy:  string                          // "ip" today
+    public Store:        Map<string, RateLimitBucket>    // key → bucket
+
+    public RateLimit() {
+        this.MaxRequests = 0
+        this.WindowNanos = 0
+        this.KeyStrategy = "ip"
+        this.Store       = new Map<string, RateLimitBucket>()
+    }
+
+    // Per-IP preset. `windowSec` is the window length in seconds.
+    public static RateLimit PerIp(int maxRequests, int windowSec) {
+        let rl = new RateLimit()
+        rl.MaxRequests = maxRequests
+        rl.WindowNanos = windowSec * 1000000000
+        rl.KeyStrategy = "ip"
+        return rl
+    }
+
+    // No-op preset — Check always returns null. Used to disable
+    // rate limiting via config without removing the wiring.
+    public static RateLimit Disabled() {
+        let rl = new RateLimit()
+        rl.MaxRequests = 0
+        return rl
+    }
+
+    // ── Builders ──────────────────────────────────────
+    public RateLimit WithMaxRequests(int n)        { this.MaxRequests = n;             return this }
+    public RateLimit WithWindowSec(int s)          { this.WindowNanos = s * 1000000000; return this }
+    public RateLimit WithKeyStrategy(string s)     { this.KeyStrategy = s;             return this }
+
+    // ── Key extraction ────────────────────────────────
+    // Strip ":port" from "192.0.2.1:54321". Returns "" if req has
+    // no RemoteAddr — caller treats as unidentifiable, current
+    // policy is to allow (better than DoS-by-blocking).
+    public string KeyFor(HttpRequest req) {
+        if (this.KeyStrategy != "ip") { return "" }
+        let addr: string = req.RemoteAddr
+        if (addr == "") { return "" }
+        // Strip port. IPv4 literal contains exactly one ':' before the
+        // port. IPv6 literals would be bracketed; today's parser
+        // produces "1.2.3.4:5678" only (v4). v2 will handle "[::1]:80".
+        let n: int = String_Length(addr)
+        var i: int = 0
+        while (i < n) {
+            let c: string = String_CharAt1(addr, i)
+            if (c == ":") {
+                return String_Substring(addr, 0, i)
+            }
+            i = i + 1
+        }
+        return addr
+    }
+
+    // ── The throttle decision ─────────────────────────
+    // Returns a 429 HttpResponse when the request exceeds the
+    // limit, else null. Always returns null when MaxRequests=0
+    // (Disabled preset).
+    public HttpResponse Check(HttpRequest req) {
+        if (this.MaxRequests <= 0) { return null }
+        let key: string = this.KeyFor(req)
+        if (key == "") { return null }     // unidentifiable, allow
+        let now: int = DateTime.NowMonotonicNanos()
+
+        var bucket: RateLimitBucket = null
+        if (this.Store.Has(key)) {
+            bucket = this.Store.Get(key)
+            // Rotate window if it's elapsed.
+            if (now - bucket.WindowStartNanos >= this.WindowNanos) {
+                bucket.Count = 0
+                bucket.WindowStartNanos = now
+            }
+        } else {
+            bucket = new RateLimitBucket()
+            bucket.WindowStartNanos = now
+            this.Store.Set(key, bucket)
+        }
+
+        if (bucket.Count >= this.MaxRequests) {
+            // 429 Too Many Requests. Retry-After in seconds — round
+            // up the remaining window. Always include Vary: not needed.
+            let elapsedNanos: int = now - bucket.WindowStartNanos
+            var remainingSec: int = (this.WindowNanos - elapsedNanos) / 1000000000
+            if (remainingSec < 1) { remainingSec = 1 }
+            let resp = HttpResponse.New()
+                .Status(429)
+                .Header("Retry-After", String_FromInt(remainingSec))
+                .Text("rate limit exceeded")
+            return resp
+        }
+
+        bucket.Count = bucket.Count + 1
+        return null
+    }
+
+    // ── FromMap — TOML/env friendly ───────────────────
+    // Recognised keys (all optional, unknown ignored):
+    //   enabled         "true" | "false"  — when false, returns Disabled()
+    //   preset          "per_ip" | "disabled"
+    //   rps             requests-per-second (becomes max=rps, window=1s)
+    //                   OR use max_requests + window_sec for full control
+    //   max_requests    int
+    //   window_sec      int
+    //   key_strategy    "ip" (only one supported today)
+    public static RateLimit FromMap(Map<string, string> cfg) {
+        if (cfg.Has("enabled") && cfg.Get("enabled") == "false") {
+            return RateLimit.Disabled()
+        }
+        var rl: RateLimit = new RateLimit()
+        if (cfg.Has("preset")) {
+            let p: string = cfg.Get("preset")
+            if (p == "disabled") { return RateLimit.Disabled() }
+            // "per_ip" with no rps/max yields a blank — caller must add via With*
+        }
+        // rps shortcut takes precedence if present.
+        if (cfg.Has("rps")) {
+            rl.MaxRequests = String_ToInt(cfg.Get("rps"))
+            rl.WindowNanos = 1000000000   // 1 second
+        }
+        if (cfg.Has("max_requests")) { rl.MaxRequests = String_ToInt(cfg.Get("max_requests")) }
+        if (cfg.Has("window_sec"))   { rl.WindowNanos = String_ToInt(cfg.Get("window_sec")) * 1000000000 }
+        if (cfg.Has("key_strategy")) { rl.KeyStrategy = cfg.Get("key_strategy") }
+        return rl
     }
 }
