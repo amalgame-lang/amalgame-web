@@ -1,44 +1,52 @@
-// amalgame-web — SignedCookieSessionStore (v0.8.3).
+// amalgame-web — SignedCookieSessionStore (v0.8.5).
 //
 // Stateless session store: the cookie value IS the encoded session.
 // No server-side storage — scales horizontally without a database,
 // session data survives server restarts (it lives client-side),
 // zero ops for new apps.
 //
-// Pattern: Flask/itsdangerous + Rails CookieStore (signed-only).
-// The cookie is signed with HMAC-SHA-256 (via amalgame-crypto) but
-// NOT encrypted in v0.1, so the session data is visible to anyone
-// who has the cookie. Tamper-proof (an attacker can't forge a
-// session) but NOT confidential.
+// Two modes (set via the `Encrypted` flag):
 //
-// Don't store secrets / credentials / sensitive PII in the session
-// while this is signed-only. Common-case data (user_id, role,
-// csrf_token, locale, theme) is fine.
+//   Signed-only (default; pre-v0.8.5 behavior):
+//     HMAC-SHA-256 over a plain-text payload. Tamper-proof, but
+//     the session data is VISIBLE to anyone who has the cookie.
+//     Cookie format: "<payload>.<sig_hex_64>"
 //
-// Cookie format:    "<payload>.<signature_hex>"
-// Payload format:   "key1=val1&key2=val2&..." (form-urlencoded style,
-//                    plain ASCII — chars '=' and '&' forbidden in
-//                    keys + values for v0.1)
-// Signature:        Hmac.Sha256OfStrings(secret, payload) → 64-char hex
+//   Encrypted (AEAD, v0.8.5+):
+//     AES-256-GCM seal of the payload, authenticated. The session
+//     data is confidential (not visible to the client) AND
+//     tamper-proof (the GCM tag authenticates ct + AAD).
+//     Cookie format: "<nonce_hex_24>.<ct_and_tag_hex>"
+//     Key derivation: AES key = SHA-256(secret), so any secret
+//     length is acceptable.
 //
-// LIMITATION v0.1:
-//   - Keys + values must not contain '&', '=', or '.' (the cookie
-//     separator). Common session data is unaffected; a future v0.2
-//     will use JSON + base64 to remove this constraint.
-//   - Constant-time compare is implemented in AM (no byte-level
-//     bitwise ops available), so timing-side-channel resistance is
-//     weaker than a C/asm implementation. Over a network the
-//     network jitter dominates anyway; mitigation: rate-limit the
-//     login endpoint.
+// The user picks the mode at construction time. Production apps
+// storing sensitive data (tokens, emails, names) should set
+// `Encrypted = true`. Apps storing only opaque ids / roles can
+// stay with signed-only for shorter cookies + zero crypto cost.
+//
+// Pattern: Flask/itsdangerous + Rails CookieStore. Compatible
+// wire shape with Go's `crypto/cipher.Seal` (ct || tag) so a
+// non-Mosaic service could decode the same cookie if it shared
+// the secret.
+//
+// LIMITATIONS v0.1 / v0.2:
+//   - Keys + values still must not contain '&', '=', or '.' (no
+//     escaping yet — JSON payload comes in a future v0.3).
+//   - Constant-time string compare still implemented in AM (signed
+//     mode only — encrypted mode delegates to OpenSSL's
+//     constant-time tag check via EVP_DecryptFinal_ex).
 
 namespace Amalgame.Web
 
 import Amalgame.Collections
 import Amalgame.String
 import Amalgame.Crypto
+import Amalgame.Random
 
 public class SignedCookieSessionStore {
-    public Secret:         string       // HMAC key — store-instance scope
+    public Secret:         string       // HMAC key OR AES key seed
+    public Encrypted:      bool         // v0.8.5: AES-256-GCM mode
     public CookieName:     string
     public CookieSecure:   bool
     public CookieSameSite: string
@@ -47,6 +55,7 @@ public class SignedCookieSessionStore {
 
     public SignedCookieSessionStore(string secret) {
         this.Secret         = secret
+        this.Encrypted      = false
         this.CookieName     = "mosaic_session"
         this.CookieSecure   = true
         this.CookieSameSite = "Lax"
@@ -56,6 +65,7 @@ public class SignedCookieSessionStore {
 
     // ── Builders ─────────────────────────────────────
     public SignedCookieSessionStore WithSecret(string s)         { this.Secret         = s; return this }
+    public SignedCookieSessionStore WithEncrypted(bool e)        { this.Encrypted      = e; return this }
     public SignedCookieSessionStore WithCookieName(string n)     { this.CookieName     = n; return this }
     public SignedCookieSessionStore WithCookieSecure(bool s)     { this.CookieSecure   = s; return this }
     public SignedCookieSessionStore WithCookieSameSite(string ss){ this.CookieSameSite = ss; return this }
@@ -63,23 +73,30 @@ public class SignedCookieSessionStore {
     public SignedCookieSessionStore WithCookieMaxAge(int a)      { this.CookieMaxAge   = a; return this }
 
     // ── Encode a Session into a cookie value ─────────
-    // Format: "<payload>.<signature_hex>"
+    // Dispatches on Encrypted flag.
     public string Encode(Session s) {
         let payload: string = SignedCookieSessionStore.SerializeData(s.Data)
+        if (this.Encrypted) {
+            return this.EncodeEncrypted(payload)
+        }
         let sig: string = Hmac.Sha256OfStrings(this.Secret, payload)
         return payload + "." + sig
     }
 
     // ── Decode a cookie value back to a Session ──────
-    // Returns null if the signature doesn't verify or the format is
-    // malformed. Caller treats null as "no valid session" and
-    // proceeds anonymously.
+    // Returns null if the signature/tag doesn't verify or the
+    // format is malformed. Caller treats null as "no valid
+    // session" and proceeds anonymously.
     public Session Decode(string cookie_value) {
+        if (this.Encrypted) {
+            return this.DecodeEncrypted(cookie_value)
+        }
+        return this.DecodeSigned(cookie_value)
+    }
+
+    // ── Signed-only path (unchanged from v0.8.3) ─────
+    private Session DecodeSigned(string cookie_value) {
         let n: int = String_Length(cookie_value)
-        // Signature is always 64 hex chars at the end, preceded by '.'.
-        // Minimum valid length: 0-byte payload + '.' + 64 chars = 65
-        // (an empty session is legal — payload is "" and signature
-        // still validates).
         if (n < 65) { return null }
         let sigStart: int = n - 64
         let dotIdx: int = sigStart - 1
@@ -88,7 +105,45 @@ public class SignedCookieSessionStore {
         let given_sig: string = String_Substring(cookie_value, sigStart, 64)
         let want_sig: string = Hmac.Sha256OfStrings(this.Secret, payload)
         if (!SignedCookieSessionStore.ConstantTimeEqualStr(want_sig, given_sig)) { return null }
-        // Signature OK — parse the payload.
+        let session = new Session("cookie")
+        session.Data = SignedCookieSessionStore.DeserializeData(payload)
+        return session
+    }
+
+    // ── AEAD encrypted path (v0.8.5) ─────────────────
+    // Wire format: <nonce_hex_24>.<ct_and_tag_hex>
+    //   nonce_hex   — 12-byte fresh random nonce, hex-encoded → 24 chars
+    //   ct_and_tag  — AES-256-GCM(key, nonce, aad="", plaintext=payload)
+    //                 → (len(payload) + 16) bytes hex-encoded
+    private string EncodeEncrypted(string payload) {
+        let key: List<int>   = SignedCookieSessionStore.DeriveAesKey(this.Secret)
+        let nonce: List<int> = Random.SystemBytes(12)
+        let aad: List<int>   = new List<int>()
+        let pt: List<int>    = Bytes.FromString(payload)
+        let ct: List<int>    = Aead.SealAes256Gcm(key, nonce, aad, pt)
+        let nonceHex: string = Bytes.ToHex(nonce)
+        let ctHex: string    = Bytes.ToHex(ct)
+        return nonceHex + "." + ctHex
+    }
+
+    private Session DecodeEncrypted(string cookie_value) {
+        let n: int = String_Length(cookie_value)
+        // Minimum length: 24 (nonce hex) + 1 ('.') + 32 (16-byte tag in hex)
+        // = 57. Empty plaintext is legal.
+        if (n < 57) { return null }
+        if (String_CharAt1(cookie_value, 24) != ".") { return null }
+        let nonceHex: string = String_Substring(cookie_value, 0, 24)
+        let ctHex: string    = String_Substring(cookie_value, 25, n - 25)
+        let nonce: List<int> = Bytes.FromHex(nonceHex)
+        let ct: List<int>    = Bytes.FromHex(ctHex)
+        // Hex parse failed (odd length / non-hex char) → reject.
+        if (nonce.Count() != 12) { return null }
+        if (ct.Count() < 16)     { return null }
+        let key: List<int> = SignedCookieSessionStore.DeriveAesKey(this.Secret)
+        let aad: List<int> = new List<int>()
+        let res: AeadResult = Aead.OpenAes256Gcm(key, nonce, aad, ct)
+        if (!res.Ok) { return null }
+        let payload: string = Bytes.ToString(res.Plaintext)
         let session = new Session("cookie")
         session.Data = SignedCookieSessionStore.DeserializeData(payload)
         return session
@@ -111,7 +166,8 @@ public class SignedCookieSessionStore {
 
     // ── FromMap — for the [sessions] TOML table when ─
     // strategy = "encrypted_cookie". Recognised keys:
-    //   secret           string — HMAC key, required
+    //   secret           string — HMAC/AES key seed, required
+    //   encrypted        "true" | "false"  (v0.8.5; default false)
     //   cookie_name      string
     //   cookie_secure    "true" | "false"
     //   cookie_samesite  "Strict" | "Lax" | "None"
@@ -121,6 +177,7 @@ public class SignedCookieSessionStore {
         var secret: string = ""
         if (cfg.Has("secret")) { secret = cfg.Get("secret") }
         let s = new SignedCookieSessionStore(secret)
+        if (cfg.Has("encrypted"))       { s.Encrypted      = (cfg.Get("encrypted") == "true") }
         if (cfg.Has("cookie_name"))     { s.CookieName     = cfg.Get("cookie_name") }
         if (cfg.Has("cookie_secure"))   { s.CookieSecure   = (cfg.Get("cookie_secure") == "true") }
         if (cfg.Has("cookie_samesite")) { s.CookieSameSite = cfg.Get("cookie_samesite") }
@@ -181,13 +238,6 @@ public class SignedCookieSessionStore {
     }
 
     // ── Internal: constant-time string compare ───────
-    // No early exit (mismatch accumulated to `acc`). The branch in
-    // the inner loop is still timing-leaky at the CPU level
-    // (modern branch predictors), but network jitter dominates over
-    // micro-architectural side channels for a remote attacker.
-    // amalgame-crypto v0.2+ should expose a true bitwise-XOR
-    // helper; until then, rate-limit the login endpoint to bound
-    // exploitation cost.
     private static bool ConstantTimeEqualStr(string a, string b) {
         if (String_Length(a) != String_Length(b)) { return false }
         let n: int = String_Length(a)
@@ -200,5 +250,19 @@ public class SignedCookieSessionStore {
             i = i + 1
         }
         return acc == 0
+    }
+
+    // ── Internal: AES key derivation ─────────────────
+    // AES-256-GCM requires exactly 32 bytes. Hash the user's
+    // arbitrary-length secret with SHA-256 to land at 32 bytes.
+    // No HKDF / salt / iteration count — the secret IS the key
+    // material, we're just normalising the length. Don't reuse
+    // this key for any other purpose (HMAC + AEAD on the same
+    // key is fine for this asymmetric construction, but if the
+    // user wires the same secret into a totally separate sub-
+    // system that's their problem to namespace).
+    private static List<int> DeriveAesKey(string secret) {
+        let secret_bytes: List<int> = Bytes.FromString(secret)
+        return Sha256.Bytes(secret_bytes)
     }
 }
