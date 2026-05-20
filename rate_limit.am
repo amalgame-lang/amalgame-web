@@ -223,20 +223,31 @@ public class RateLimit {
     // closed would let one downed cache turn every endpoint into
     // a 429 hot mess — worse than ungated traffic during the
     // outage. Production should monitor Redis health separately.
+    // v0.9.3: serialised via this.Mu — the RESP2 protocol is
+    // single-stream, so two threads doing INCR+EXPIRE on the same
+    // RedisHandle in parallel would interleave their bytes and
+    // potentially read each other's replies. The lock covers the
+    // whole INCR + conditional EXPIRE pair so the "first call sets
+    // TTL" semantics stay correct.
     private HttpResponse CheckRedis(string key) {
-        if (!this.EnsureRedisHandle()) { return null }   // fail-open
-        let rkey: string = this.RedisKeyPrefix + ":" + key
-        let count: int = Redis.Incr(this.RedisHandle, rkey)
-        if (count == 1) {
-            let windowSec: int = this.WindowNanos / 1000000000
-            Redis.Expire(this.RedisHandle, rkey, windowSec)
+        Threading.MutexLock(this.Mu)
+        var resp: HttpResponse = null
+        if (this.EnsureRedisHandle()) {
+            let rkey: string = this.RedisKeyPrefix + ":" + key
+            let count: int = Redis.Incr(this.RedisHandle, rkey)
+            if (count == 1) {
+                let windowSec: int = this.WindowNanos / 1000000000
+                Redis.Expire(this.RedisHandle, rkey, windowSec)
+            }
+            if (count > this.MaxRequests) {
+                var remainingSec: int = this.WindowNanos / 1000000000
+                if (remainingSec < 1) { remainingSec = 1 }
+                resp = RateLimit.Make429(remainingSec)
+            }
         }
-        if (count > this.MaxRequests) {
-            var remainingSec: int = this.WindowNanos / 1000000000
-            if (remainingSec < 1) { remainingSec = 1 }
-            return RateLimit.Make429(remainingSec)
-        }
-        return null
+        // else fail-open: leave resp null = allow
+        Threading.MutexUnlock(this.Mu)
+        return resp
     }
 
     // Lazy-open the pooled Redis handle. Idempotent.
