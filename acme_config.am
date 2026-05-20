@@ -1,0 +1,140 @@
+// amalgame-web — AcmeConfig (v0.10.0).
+//
+// Configuration helper for ACME (Let's Encrypt) cert provisioning
+// via the amalgame-tls v0.2+ Acme.EnsureCert family. Mosaic owns
+// the TOML schema + the FromMap wiring; the actual provisioning
+// call lives in user code so it can sequence with its own startup
+// (DB connection, migrations, etc.) before binding port 443.
+//
+// User pattern (`amc package add tls + net-http`):
+//
+//   import Amalgame.Web
+//   import Amalgame.Tls
+//   import Amalgame.Net.Http
+//
+//   public class Program {
+//       public static void Main(string[] args) {
+//           let acme = AcmeConfig.FromTomlOrDefault("mosaic.toml")
+//           if (acme.Enabled) {
+//               let rc: int = Acme.EnsureCertEx(
+//                   acme.Domain, acme.Email, acme.CertDir,
+//                   acme.AcmeServer, acme.CertbotPath)
+//               if (rc != 0) {
+//                   Console.WriteError("ACME provisioning failed: " +
+//                       String_FromInt(rc))
+//                   return
+//               }
+//           }
+//           let cert: string = acme.CertPath()
+//           let key:  string = acme.KeyPath()
+//           let handler = conn => {
+//               // ... your handler ...
+//               return 0
+//           }
+//           Https.Serve(443, cert, key, handler)
+//       }
+//   }
+//
+// The TOML section read by `FromMap` (which `FromTomlOrDefault`
+// composes via Toml.Parse on the project root file):
+//
+//   [tls.acme]
+//   enabled       = true
+//   domain        = "example.com"
+//   email         = "ops@example.com"
+//   cert_dir      = "./certs"          # default
+//   acme_server   = ""                 # empty = LE production
+//                                       # ex: "https://acme-staging-v02.api.letsencrypt.org/directory"
+//   certbot_path  = ""                 # empty = look up "certbot" in $PATH
+//
+// Env overrides applied by amalgame-tls itself (see Acme.h):
+//   MOSAIC_TLS_ACME_SERVER, MOSAIC_TLS_CERTBOT_PATH
+//
+// v0.2.x of amalgame-tls wraps certbot --standalone. v0.3 will
+// ship a native pure-AM ACME (RFC 8555) — same AcmeConfig API,
+// same TOML schema; only the call site changes (from EnsureCertEx
+// to a native equivalent). The Mosaic config layer stays stable.
+
+namespace Amalgame.Web
+
+import Amalgame.Collections
+import Amalgame.String
+
+public class AcmeConfig {
+    public Enabled:      bool
+    public Domain:       string
+    public Email:        string
+    public CertDir:      string
+    public AcmeServer:   string       // "" = certbot's default (LE prod)
+    public CertbotPath:  string       // "" = look up "certbot" in $PATH
+
+    public AcmeConfig() {
+        this.Enabled     = false
+        this.Domain      = ""
+        this.Email       = ""
+        this.CertDir     = "./certs"
+        this.AcmeServer  = ""
+        this.CertbotPath = ""
+    }
+
+    // ── Builders ─────────────────────────────────────
+    public AcmeConfig WithEnabled(bool e)        { this.Enabled     = e; return this }
+    public AcmeConfig WithDomain(string d)       { this.Domain      = d; return this }
+    public AcmeConfig WithEmail(string e)        { this.Email       = e; return this }
+    public AcmeConfig WithCertDir(string d)      { this.CertDir     = d; return this }
+    public AcmeConfig WithAcmeServer(string s)   { this.AcmeServer  = s; return this }
+    public AcmeConfig WithCertbotPath(string p)  { this.CertbotPath = p; return this }
+
+    // ── Validation ───────────────────────────────────
+    // Returns "" when the config is sane (enabled + domain + email),
+    // a single-line reason string when it isn't. Empty Domain or
+    // Email when Enabled=true is the most common misconfig.
+    public string Validate() {
+        if (!this.Enabled) { return "" }
+        if (String_Length(this.Domain) == 0) {
+            return "tls.acme.enabled=true but domain is empty"
+        }
+        if (String_Length(this.Email) == 0) {
+            return "tls.acme.enabled=true but email is empty"
+        }
+        if (String_Length(this.CertDir) == 0) {
+            return "tls.acme.cert_dir is empty"
+        }
+        return ""
+    }
+
+    // ── Cert/key paths ───────────────────────────────
+    // Mirror the layout Acme.CertPath / Acme.KeyPath produce. Kept
+    // local so user code can compute them without depending on
+    // amalgame-tls' AM-side facade (which would force `import
+    // Amalgame.Tls` even for apps that only need the paths).
+    //
+    // certbot's --standalone writes to:
+    //   <cert_dir>/<domain>/fullchain.pem
+    //   <cert_dir>/<domain>/privkey.pem
+    public string CertPath() {
+        return this.CertDir + "/" + this.Domain + "/fullchain.pem"
+    }
+    public string KeyPath() {
+        return this.CertDir + "/" + this.Domain + "/privkey.pem"
+    }
+
+    // ── FromMap — for the [tls.acme] TOML table ──────
+    // Recognised keys:
+    //   enabled       "true" | "false"  (default false)
+    //   domain        string  (required when enabled=true)
+    //   email         string  (required when enabled=true)
+    //   cert_dir      string  (default "./certs")
+    //   acme_server   string  (default "" = certbot's LE prod)
+    //   certbot_path  string  (default "" = lookup in $PATH)
+    public static AcmeConfig FromMap(Map<string, string> cfg) {
+        let a = new AcmeConfig()
+        if (cfg.Has("enabled"))      { a.Enabled     = (cfg.Get("enabled") == "true") }
+        if (cfg.Has("domain"))       { a.Domain      = cfg.Get("domain") }
+        if (cfg.Has("email"))        { a.Email       = cfg.Get("email") }
+        if (cfg.Has("cert_dir"))     { a.CertDir     = cfg.Get("cert_dir") }
+        if (cfg.Has("acme_server"))  { a.AcmeServer  = cfg.Get("acme_server") }
+        if (cfg.Has("certbot_path")) { a.CertbotPath = cfg.Get("certbot_path") }
+        return a
+    }
+}
