@@ -42,6 +42,12 @@ project. amalgame-web stays pure-library.
   (or null when the method/path is exempt). Presets `Default` /
   `Disabled`, builders for cookie attributes + safe methods +
   exempt paths, `Csrf.FromMap(...)`.
+- **WebApp** (v0.8.0) — orchestrator chaining every middleware into
+  a single `Handle(req)` entry point.
+- **LogConfig + WebApp.WithLogging** (v0.8.2) — bridges Mosaic's
+  `[logging]` TOML table into `amalgame-logging`. Sets the
+  process-wide level + file sink at startup; emits a one-liner
+  per request at INFO level when `access_log = true`.
 
 ## Roadmap
 
@@ -55,6 +61,7 @@ amc package add tls          # for HTTPS later
 amc package add net-http     # HTTP parser + types
 amc package add datetime     # for RateLimit (monotonic clock)
 amc package add random       # for Csrf (crypto entropy)
+amc package add logging      # for LogConfig + access logs
 amc package add web          # this package
 ```
 

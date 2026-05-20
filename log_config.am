@@ -1,0 +1,68 @@
+// amalgame-web — LogConfig (v0.8.2).
+//
+// Bridge between Mosaic's `[logging]` TOML table and the
+// amalgame-logging facade. The facade itself is mostly static —
+// `Log.SetMinLevel(...)` / `Log.SetFile(...)` set process-wide
+// state. This class snapshots the config so WebApp.Handle can emit
+// the access-log line per request.
+//
+// Today's surface (v0.8.2):
+//   level             → Log.SetMinLevel
+//   file              → Log.SetFile (optional file sink)
+//   access_log        → WebApp.Handle emits "<method> <path> <status>"
+//                       at INFO level after each request
+//   request_id_header → field present; WebApp wiring (generate +
+//                       read-back) lives in a future patch
+//   format            → field present; today amalgame-logging is
+//                       text-only. v0.x.y will add JSON output
+//                       when the library exposes it.
+
+namespace Amalgame.Web
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.Logging
+
+public class LogConfig {
+    public Level:           string   // "debug" | "info" | "warn" | "error"
+    public File:            string   // "" = stderr only
+    public AccessLog:       bool     // log one line per HTTP request
+    public Format:          string   // "text" (default) | "json" (planned)
+    public RequestIdHeader: string   // default "X-Request-Id"
+
+    public LogConfig() {
+        this.Level           = "info"
+        this.File            = ""
+        this.AccessLog       = true
+        this.Format          = "text"
+        this.RequestIdHeader = "X-Request-Id"
+    }
+
+    // ── Builders ─────────────────────────────────────
+    public LogConfig WithLevel(string l)              { this.Level           = l; return this }
+    public LogConfig WithFile(string p)               { this.File            = p; return this }
+    public LogConfig WithAccessLog(bool on)           { this.AccessLog       = on; return this }
+    public LogConfig WithFormat(string f)             { this.Format          = f; return this }
+    public LogConfig WithRequestIdHeader(string h)    { this.RequestIdHeader = h; return this }
+
+    // Apply the process-wide knobs (level + file sink). Idempotent;
+    // safe to call multiple times. The Mosaic CLI calls this once
+    // at startup after building LogConfig from the TOML.
+    public void Apply() {
+        Log.SetMinLevel(this.Level)
+        if (String_Length(this.File) > 0) {
+            Log.SetFile(this.File)
+        }
+    }
+
+    // FromMap for the [logging] TOML table.
+    public static LogConfig FromMap(Map<string, string> cfg) {
+        let c = new LogConfig()
+        if (cfg.Has("level"))               { c.Level           = cfg.Get("level") }
+        if (cfg.Has("file"))                { c.File            = cfg.Get("file") }
+        if (cfg.Has("access_log"))          { c.AccessLog       = (cfg.Get("access_log") == "true") }
+        if (cfg.Has("format"))              { c.Format          = cfg.Get("format") }
+        if (cfg.Has("request_id_header"))   { c.RequestIdHeader = cfg.Get("request_id_header") }
+        return c
+    }
+}

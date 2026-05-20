@@ -79,7 +79,7 @@ if [ -z "$DATETIME_DIR" ] || [ ! -f "$DATETIME_DIR/facade.am" ]; then
     exit 2
 fi
 
-# Locate amalgame-random (used by Csrf since v0.7.0). Same chain.
+## Locate amalgame-random (used by Csrf since v0.7.0). Same chain.
 RANDOM_DIR=""
 if [ -n "$AMALGAME_RANDOM" ] && [ -d "$AMALGAME_RANDOM" ]; then
     RANDOM_DIR="$AMALGAME_RANDOM"
@@ -95,6 +95,22 @@ if [ -z "$RANDOM_DIR" ] || [ ! -f "$RANDOM_DIR/facade.am" ]; then
     exit 2
 fi
 
+# Locate amalgame-logging (used by LogConfig + WebApp.WithLogging since v0.8.2).
+LOGGING_DIR=""
+if [ -n "$AMALGAME_LOGGING" ] && [ -d "$AMALGAME_LOGGING" ]; then
+    LOGGING_DIR="$AMALGAME_LOGGING"
+elif [ -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-logging" ]; then
+    LOGGING_DIR="$(ls -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-logging"/*/ 2>/dev/null | head -1)"
+    LOGGING_DIR="${LOGGING_DIR%/}"
+elif [ -d "$PKG_DIR/../amalgame-logging" ]; then
+    LOGGING_DIR="$PKG_DIR/../amalgame-logging"
+fi
+if [ -z "$LOGGING_DIR" ] || [ ! -f "$LOGGING_DIR/facade.am" ]; then
+    echo -e "${RED}error: amalgame-logging not found${NC}"
+    echo "  set AMALGAME_LOGGING=<path> or run \`amc package add logging\`"
+    exit 2
+fi
+
 # Build sibling facade .o files once, then amalgame-web's own.
 # Order matters: net-http and datetime have no inter-dep; web
 # depends on both. --external on the web build wires the types
@@ -106,13 +122,16 @@ gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RUNTIME_DIR" -c
 gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/datetime.c" -o "$BUILD_DIR/datetime.o" 2>&1 | head -5
 [ -s "$BUILD_DIR/datetime.o" ] || { echo -e "${RED}datetime build failed${NC}"; exit 1; }
 "$AMC" --lib -o "$BUILD_DIR/random" "$RANDOM_DIR/facade.am" 2>&1 | tail -2
-gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/random.c" -o "$BUILD_DIR/random.o" 2>&1 | head -5
+gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/random.c" -o "$BUILD_DIR/random.o" 2>&1 | head -5
 [ -s "$BUILD_DIR/random.o" ] || { echo -e "${RED}random build failed${NC}"; exit 1; }
+"$AMC" --lib -o "$BUILD_DIR/logging" "$LOGGING_DIR/facade.am" 2>&1 | tail -2
+gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/logging.c" -o "$BUILD_DIR/logging.o" 2>&1 | head -5
+[ -s "$BUILD_DIR/logging.o" ] || { echo -e "${RED}logging build failed${NC}"; exit 1; }
 # v0.7.x: amalgame-web is split across multiple .am files
 # (facade.am + sources from amalgame.toml). The compiler treats
 # them all as the same package; we just have to pass each one to
 # both the lib build and the test --external chain.
-WEB_SOURCES="facade.am session.am web_context.am security_headers.am cors.am rate_limit.am csrf.am web_app.am"
+WEB_SOURCES="facade.am session.am web_context.am security_headers.am cors.am rate_limit.am csrf.am log_config.am web_app.am"
 WEB_EXTERNAL_FLAGS=""
 for src in $WEB_SOURCES; do
     WEB_EXTERNAL_FLAGS="$WEB_EXTERNAL_FLAGS --external $src"
@@ -121,8 +140,9 @@ done
 "$AMC" --lib -o "$BUILD_DIR/facade" $WEB_SOURCES \
     --external "$NETHTTP_DIR/facade.am" \
     --external "$DATETIME_DIR/facade.am" \
-    --external "$RANDOM_DIR/facade.am" 2>&1 | tail -2
-gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/facade.c" -o "$BUILD_DIR/facade.o" 2>&1 | head -5
+    --external "$RANDOM_DIR/facade.am" \
+    --external "$LOGGING_DIR/facade.am" 2>&1 | tail -2
+gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/facade.c" -o "$BUILD_DIR/facade.o" 2>&1 | head -5
 [ -s "$BUILD_DIR/facade.o" ] || { echo -e "${RED}facade build failed${NC}"; exit 1; }
 
 # Build + run one test file. --external order matters: net-http first
@@ -137,9 +157,10 @@ build_and_run() {
         --external "$NETHTTP_DIR/facade.am" \
         --external "$DATETIME_DIR/facade.am" \
         --external "$RANDOM_DIR/facade.am" \
+        --external "$LOGGING_DIR/facade.am" \
         $WEB_EXTERNAL_FLAGS 2>&1 | tail -2
-    gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$RUNTIME_DIR" \
-        "$BUILD_DIR/$name.c" "$BUILD_DIR/facade.o" "$BUILD_DIR/nethttp.o" "$BUILD_DIR/datetime.o" "$BUILD_DIR/random.o" \
+    gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$RUNTIME_DIR" \
+        "$BUILD_DIR/$name.c" "$BUILD_DIR/facade.o" "$BUILD_DIR/nethttp.o" "$BUILD_DIR/datetime.o" "$BUILD_DIR/random.o" "$BUILD_DIR/logging.o" \
         -lgc -lm -lz -o "$BUILD_DIR/$name" 2>&1 | head -5
     [ -x "$BUILD_DIR/$name" ] || { echo -e "${RED}${name} build failed${NC}"; exit 1; }
     "$BUILD_DIR/$name"

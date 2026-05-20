@@ -53,6 +53,7 @@ namespace Amalgame.Web
 
 import Amalgame.Collections
 import Amalgame.String
+import Amalgame.Logging
 
 public class WebApp {
     public Routes:          Router
@@ -60,6 +61,7 @@ public class WebApp {
     public CorsCfg:         Cors              // null = no CORS handling
     public CsrfCfg:         Csrf              // null = no CSRF validation
     public Limiter:         RateLimit         // null = no rate limit
+    public Logging:         LogConfig         // null = no access log
     public State:           Map<string, string>  // app-level shared state
 
     public WebApp() {
@@ -68,6 +70,7 @@ public class WebApp {
         this.CorsCfg = null
         this.CsrfCfg = null
         this.Limiter = null
+        this.Logging = null
         this.State   = new Map<string, string>()
     }
 
@@ -78,6 +81,15 @@ public class WebApp {
     public WebApp WithCors(Cors c)                         { this.CorsCfg = c;    return this }
     public WebApp WithCsrf(Csrf c)                         { this.CsrfCfg = c;    return this }
     public WebApp WithRateLimit(RateLimit rl)              { this.Limiter = rl;   return this }
+    // Apply level + file sink on the amalgame-logging facade
+    // immediately so subsequent Log.Info/Warn/etc. honor them. The
+    // LogConfig is also kept on the WebApp so Handle() can emit the
+    // access-log line per request.
+    public WebApp WithLogging(LogConfig lc) {
+        this.Logging = lc
+        if (lc != null) { lc.Apply() }
+        return this
+    }
 
     // ── Shared state (app-level k/v, exposed to handlers via ctx.State) ──
     public WebApp WithState(string key, string value) {
@@ -143,7 +155,15 @@ public class WebApp {
             resp = m.Route.Handler(ctx)
         }
 
-        return this.applyResponseMiddlewares(req, resp)
+        let final: HttpResponse = this.applyResponseMiddlewares(req, resp)
+
+        // Access log (v0.8.2). One-liner per request at INFO level.
+        // Format: "METHOD path -> status". Future v0.x.y will switch
+        // to JSON when amalgame-logging exposes a JSON sink.
+        if (this.Logging != null && this.Logging.AccessLog) {
+            Log.Info(req.Method + " " + req.Path + " -> " + String_FromInt(final.StatusCode))
+        }
+        return final
     }
 
     // ── Internal: response-side middleware chain ─────
