@@ -1,0 +1,216 @@
+// Unit tests for Cors (v0.5.0).
+//
+// Verifies:
+//   - empty Cors stamps nothing
+//   - AllowAll / Strict presets shape
+//   - Preflight returns null for non-preflight
+//   - Preflight returns 204 with correct headers for matching origin
+//   - Preflight 204 without Allow-* when origin not in allowlist
+//   - Apply adds Allow-Origin for cross-origin matching request
+//   - Apply skips when no Origin header
+//   - Wildcard + credentials downgrades to echoed origin
+//   - Handler-set headers preserved (handler wins)
+//   - FromMap composes preset + per-key override
+//   - FromMap parses CSV lists
+
+namespace Tests
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.Net.Http
+import Amalgame.Web
+
+public class Program {
+    public static void Main(string[] args) {
+        Console.WriteLine("amalgame-web — Cors tests")
+
+        // Helper: make a minimal HttpRequest with method + origin (+ optional preflight method)
+        // We build it inline since HttpRequest's public fields are mutable.
+
+        // ── 1. Empty Cors = no-op ─────────────────────────────────
+        let empty = new Cors()
+        let req1 = new HttpRequest()
+        req1.Method = "GET"
+        req1.Headers.Set("origin", "https://app.example.com")
+        let r1 = HttpResponse.New().Text("hi")
+        empty.Apply(req1, r1)
+        if (!r1.Headers.Has("Access-Control-Allow-Origin")) {
+            Console.WriteLine("[PASS] empty Cors stamps nothing")
+        } else {
+            Console.WriteLine("[FAIL] empty leaked Allow-Origin")
+        }
+
+        // ── 2. AllowAll preset ────────────────────────────────────
+        let all = Cors.AllowAll()
+        let req2 = new HttpRequest()
+        req2.Method = "GET"
+        req2.Headers.Set("origin", "https://random.example.com")
+        let r2 = HttpResponse.New().Text("data")
+        all.Apply(req2, r2)
+        if (r2.Headers.Get("Access-Control-Allow-Origin") == "*"
+            && r2.Headers.Get("Vary") == "Origin") {
+            Console.WriteLine("[PASS] AllowAll wildcard + Vary")
+        } else {
+            Console.WriteLine("[FAIL] AllowAll got: AO=" + r2.Headers.Get("Access-Control-Allow-Origin") + " Vary=" + r2.Headers.Get("Vary"))
+        }
+
+        // ── 3. Strict + explicit origin allowlist ────────────────
+        let strict = Cors.Strict().AddOrigin("https://app.example.com")
+        let req3 = new HttpRequest()
+        req3.Method = "GET"
+        req3.Headers.Set("origin", "https://app.example.com")
+        let r3 = HttpResponse.New().Text("ok")
+        strict.Apply(req3, r3)
+        if (r3.Headers.Get("Access-Control-Allow-Origin") == "https://app.example.com") {
+            Console.WriteLine("[PASS] Strict echoes matched origin")
+        } else {
+            Console.WriteLine("[FAIL] Strict got: " + r3.Headers.Get("Access-Control-Allow-Origin"))
+        }
+
+        // ── 4. Non-allowed origin gets Vary but no Allow-Origin ──
+        let req4 = new HttpRequest()
+        req4.Method = "GET"
+        req4.Headers.Set("origin", "https://evil.example.com")
+        let r4 = HttpResponse.New().Text("ok")
+        strict.Apply(req4, r4)
+        if (!r4.Headers.Has("Access-Control-Allow-Origin")
+            && r4.Headers.Get("Vary") == "Origin") {
+            Console.WriteLine("[PASS] non-allowed origin: Vary set, Allow-Origin absent")
+        } else {
+            Console.WriteLine("[FAIL] non-allowed leak")
+        }
+
+        // ── 5. No Origin header = total no-op ────────────────────
+        let req5 = new HttpRequest()
+        req5.Method = "GET"
+        let r5 = HttpResponse.New().Text("same-origin")
+        strict.Apply(req5, r5)
+        if (!r5.Headers.Has("Access-Control-Allow-Origin")
+            && !r5.Headers.Has("Vary")) {
+            Console.WriteLine("[PASS] no Origin = no-op")
+        } else {
+            Console.WriteLine("[FAIL] no-origin leaked")
+        }
+
+        // ── 6. Preflight returns null for non-OPTIONS ────────────
+        let req6 = new HttpRequest()
+        req6.Method = "POST"
+        req6.Headers.Set("origin", "https://app.example.com")
+        let pf6: HttpResponse = strict.Preflight(req6)
+        if (pf6 == null) {
+            Console.WriteLine("[PASS] Preflight null for non-OPTIONS")
+        } else {
+            Console.WriteLine("[FAIL] Preflight should be null for POST")
+        }
+
+        // ── 7. Preflight returns null for OPTIONS without ACRM ──
+        let req7 = new HttpRequest()
+        req7.Method = "OPTIONS"
+        req7.Headers.Set("origin", "https://app.example.com")
+        // no Access-Control-Request-Method = not a CORS preflight
+        let pf7: HttpResponse = strict.Preflight(req7)
+        if (pf7 == null) {
+            Console.WriteLine("[PASS] Preflight null without ACRM")
+        } else {
+            Console.WriteLine("[FAIL] Preflight should be null without ACRM")
+        }
+
+        // ── 8. Preflight returns 204 with Allow-* for matching origin ──
+        let req8 = new HttpRequest()
+        req8.Method = "OPTIONS"
+        req8.Headers.Set("origin", "https://app.example.com")
+        req8.Headers.Set("access-control-request-method", "POST")
+        let pf8: HttpResponse = strict.Preflight(req8)
+        if (pf8 != null
+            && pf8.StatusCode == 204
+            && pf8.Headers.Get("Access-Control-Allow-Origin") == "https://app.example.com"
+            && pf8.Headers.Has("Access-Control-Allow-Methods")
+            && pf8.Headers.Get("Access-Control-Max-Age") == "86400") {
+            Console.WriteLine("[PASS] Preflight 204 + allow headers")
+        } else {
+            Console.WriteLine("[FAIL] Preflight 204 shape")
+        }
+
+        // ── 9. Preflight 204 without Allow-* for non-allowed origin ──
+        let req9 = new HttpRequest()
+        req9.Method = "OPTIONS"
+        req9.Headers.Set("origin", "https://evil.example.com")
+        req9.Headers.Set("access-control-request-method", "POST")
+        let pf9: HttpResponse = strict.Preflight(req9)
+        if (pf9 != null
+            && pf9.StatusCode == 204
+            && !pf9.Headers.Has("Access-Control-Allow-Origin")) {
+            Console.WriteLine("[PASS] Preflight 204 no-allow for non-listed")
+        } else {
+            Console.WriteLine("[FAIL] Preflight 204 non-listed shape")
+        }
+
+        // ── 10. Credentials downgrades wildcard to echoed origin ──
+        let allCreds = Cors.AllowAll().WithAllowCredentials(true)
+        let req10 = new HttpRequest()
+        req10.Method = "GET"
+        req10.Headers.Set("origin", "https://app.example.com")
+        let r10 = HttpResponse.New().Text("ok")
+        allCreds.Apply(req10, r10)
+        if (r10.Headers.Get("Access-Control-Allow-Origin") == "https://app.example.com"
+            && r10.Headers.Get("Access-Control-Allow-Credentials") == "true") {
+            Console.WriteLine("[PASS] credentials downgrades wildcard to specific")
+        } else {
+            Console.WriteLine("[FAIL] cred wildcard got: AO=" + r10.Headers.Get("Access-Control-Allow-Origin"))
+        }
+
+        // ── 11. Handler-set Allow-Origin preserved ───────────────
+        let req11 = new HttpRequest()
+        req11.Method = "GET"
+        req11.Headers.Set("origin", "https://app.example.com")
+        let r11 = HttpResponse.New()
+            .Header("Access-Control-Allow-Origin", "https://special.example.com")
+            .Text("custom")
+        strict.Apply(req11, r11)
+        if (r11.Headers.Get("Access-Control-Allow-Origin") == "https://special.example.com") {
+            Console.WriteLine("[PASS] handler-set Allow-Origin preserved")
+        } else {
+            Console.WriteLine("[FAIL] Apply overwrote handler header")
+        }
+
+        // ── 12. FromMap empty ────────────────────────────────────
+        let cfg0 = new Map<string, string>()
+        let c0 = Cors.FromMap(cfg0)
+        if (c0.AllowedOrigins.Count() == 0 && !c0.AllowCredentials) {
+            Console.WriteLine("[PASS] FromMap empty = blank Cors")
+        } else {
+            Console.WriteLine("[FAIL] FromMap empty leaked")
+        }
+
+        // ── 13. FromMap preset + override ────────────────────────
+        let cfg1 = new Map<string, string>()
+        cfg1.Set("preset", "strict")
+        cfg1.Set("allowed_origins", "https://a.example.com, https://b.example.com")
+        cfg1.Set("allow_credentials", "true")
+        cfg1.Set("max_age_sec", "3600")
+        let c1 = Cors.FromMap(cfg1)
+        if (c1.AllowedOrigins.Count() == 2
+            && c1.AllowedOrigins.Get(0) == "https://a.example.com"
+            && c1.AllowedOrigins.Get(1) == "https://b.example.com"
+            && c1.AllowCredentials
+            && c1.MaxAgeSec == 3600) {
+            Console.WriteLine("[PASS] FromMap preset + CSV + credentials + max-age")
+        } else {
+            Console.WriteLine("[FAIL] FromMap shape: count=" + String_FromInt(c1.AllowedOrigins.Count()) + " maxAge=" + String_FromInt(c1.MaxAgeSec))
+        }
+
+        // ── 14. FromMap allow_all preset ─────────────────────────
+        let cfg2 = new Map<string, string>()
+        cfg2.Set("preset", "allow_all")
+        let c2 = Cors.FromMap(cfg2)
+        if (c2.AllowedOrigins.Count() == 1
+            && c2.AllowedOrigins.Get(0) == "*"
+            && c2.AllowedMethods.Count() > 0) {
+            Console.WriteLine("[PASS] FromMap allow_all preset")
+        } else {
+            Console.WriteLine("[FAIL] FromMap allow_all")
+        }
+
+        Console.WriteLine("done")
+    }
+}

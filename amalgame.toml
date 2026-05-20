@@ -6,6 +6,7 @@
 #   - Session + MemorySessionStore
 #   - WebContext (per-request bag)
 #   - SecurityHeaders (response-side hardening — v0.4.0)
+#   - Cors (cross-origin resource sharing — v0.5.0)
 #
 # The BUILD TOOL (filesystem routing, Next.js App Router style,
 # DEV mode, scaffolding) is a separate project — install it once
@@ -22,7 +23,7 @@
 
 [package]
 name              = "amalgame-web"
-version           = "0.4.1"
+version           = "0.5.0"
 license           = "Apache-2.0"
 description       = "Mosaic — the Amalgame web framework runtime library."
 required-amalgame = ">=0.8.35"
@@ -37,6 +38,7 @@ classes   = [
     "MemorySessionStore",
     "WebContext",
     "SecurityHeaders",
+    "Cors",
 ]
 header    = "runtime/Amalgame_Web.h"
 namespace = "Amalgame.Web"

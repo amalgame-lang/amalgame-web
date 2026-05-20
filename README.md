@@ -27,12 +27,15 @@ project. amalgame-web stays pure-library.
   `SecurityHeaders.FromMap(...)` (v0.4.1) wires it to flat key/value
   config (consumed by the Mosaic CLI when it flattens `mosaic.toml`'s
   `[security.headers]` table).
+- **Cors** (v0.5.0) — CORS middleware: `Preflight(req)` handles
+  OPTIONS preflight, `Apply(req, resp)` decorates normal cross-origin
+  responses. Presets `AllowAll` / `Strict`, builders for fine-grained
+  control, `Cors.FromMap(...)` for TOML-driven wiring.
 
 ## Roadmap
 
-- v0.4.x — Security pack: CORS, CSRF, rate-limit middlewares
-- v0.5.x — ACME / Let's Encrypt integration via amalgame-tls
-- v0.6.x — `JsonFileSessionStore`, `RedisSessionStore`
+- v0.5.x — Security pack continued: CSRF, rate-limit middlewares
+- v0.6.x — `JsonFileSessionStore`, `RedisSessionStore`, cookie attribute config
 - v0.7.x — Reverse proxy + layout/nested-layout helpers
 
 ## Install
@@ -174,6 +177,59 @@ Recognised keys: `preset` (`strict_html` | `strict_api`), `csp`,
 `referrer_policy`, `permissions_policy`, `coop`, `coep`, `hsts`
 (pre-composed) OR `hsts_max_age` + `hsts_include_subdomains` +
 `hsts_preload`. Unknown keys are ignored (forward-compat).
+
+## Cors (v0.5.0)
+
+Cross-origin resource sharing — preflight handler + response decorator.
+
+```amalgame
+let cors = Cors.Strict()
+    .WithAllowedOrigins(["https://app.example.com"])
+    .WithAllowedHeaders(["Content-Type", "Authorization"])
+    .WithAllowCredentials(true)
+    .WithMaxAge(86400)
+
+// in dispatch:
+let pf: HttpResponse = cors.Preflight(req)
+if (pf != null) {
+    TcpConn_Send(conn, pf.Render())
+    continue                                 // short-circuit — handler not called
+}
+let resp = match.Route.Handler(ctx)
+cors.Apply(req, resp)                        // decorates resp with Allow-Origin / Vary / etc.
+TcpConn_Send(conn, resp.Render())
+```
+
+- **`Preflight(req)`** returns a 204 response when `req` is a CORS
+  preflight (OPTIONS + `Access-Control-Request-Method`), `null`
+  otherwise. The 204 carries the allow-* headers when origin
+  matches, or none when not (browser then rejects).
+- **`Apply(req, resp)`** stamps `Access-Control-Allow-Origin`,
+  `Access-Control-Allow-Credentials`, `Access-Control-Expose-Headers`
+  onto a normal response. Always sets `Vary: Origin` when a cross-
+  origin request is detected, even on non-matching origins, so
+  HTTP caches don't cross-serve.
+- **Wildcard + credentials are spec-incompatible**: when
+  `AllowCredentials = true`, the wildcard `"*"` is suppressed and
+  the specific request origin is echoed back instead.
+- **Handler-wins**: if your route already set
+  `Access-Control-Allow-Origin`, `Apply` leaves it alone.
+
+`Cors.FromMap(Map<string, string>)` mirrors the `SecurityHeaders`
+pattern. Recognised keys:
+
+```toml
+[security.cors]
+preset             = "strict"            # or "allow_all" / "disabled"
+allowed_origins    = "https://a.example.com, https://b.example.com"
+allowed_methods    = "GET, POST"
+allowed_headers    = "Content-Type, Authorization"
+exposed_headers    = "X-Request-Id"
+allow_credentials  = true
+max_age_sec        = 86400
+```
+
+Lists are comma-separated with optional whitespace; each element is trimmed.
 
 | Builder | Default | Header it controls |
 |---|---|---|
