@@ -31,18 +31,24 @@ project. amalgame-web stays pure-library.
   OPTIONS preflight, `Apply(req, resp)` decorates normal cross-origin
   responses. Presets `AllowAll` / `Strict`, builders for fine-grained
   control, `Cors.FromMap(...)` for TOML-driven wiring.
+- **RateLimit** (v0.6.0) — fixed-window per-key throttle.
+  `Check(req)` returns a 429 response on overflow (with Retry-After),
+  null when allowed. Per-IP keying via `RemoteAddr`. Time source:
+  monotonic nanoseconds via `amalgame-datetime`. Presets `PerIp` /
+  `Disabled`, builders, `RateLimit.FromMap(...)`.
 
 ## Roadmap
 
-- v0.5.x — Security pack continued: CSRF, rate-limit middlewares
-- v0.6.x — `JsonFileSessionStore`, `RedisSessionStore`, cookie attribute config
-- v0.7.x — Reverse proxy + layout/nested-layout helpers
+- v0.6.x — Security pack continued: CSRF middleware (needs amalgame-random)
+- v0.7.x — `JsonFileSessionStore`, `RedisSessionStore`, cookie attribute config
+- v0.8.x — Reverse proxy + layout/nested-layout helpers
 
 ## Install
 
 ```bash
 amc package add tls          # for HTTPS later
 amc package add net-http     # HTTP parser + types
+amc package add datetime     # for RateLimit (monotonic clock)
 amc package add web          # this package
 ```
 
@@ -251,3 +257,48 @@ Lists are comma-separated with optional whitespace; each element is trimmed.
 ## License
 
 Apache-2.0. See [LICENSE](./LICENSE).
+
+## RateLimit (v0.6.0)
+
+Fixed-window per-key throttle. Counts requests per IP per window;
+returns a 429 response with `Retry-After` when over.
+
+```amalgame
+let rl = RateLimit.PerIp(100, 60)         // 100 req per 60 s per IP
+
+// in dispatch:
+let limited: HttpResponse = rl.Check(req)
+if (limited != null) {
+    TcpConn_Send(conn, limited.Render())
+    continue                              // short-circuit handler
+}
+let resp = match.Route.Handler(ctx)
+...
+```
+
+Time source is `DateTime.NowMonotonicNanos()` from
+[amalgame-datetime](https://github.com/amalgame-lang/amalgame-datetime)
+— monotonic, immune to NTP slews + DST jumps. The store is an
+in-process `Map<key, RateLimitBucket>`; v0.7 will add a Redis backend
+for multi-process / multi-host deployments.
+
+Known limitation: the **fixed-window algorithm** can allow up to
+`2 × MaxRequests` across a single window boundary (a burst that
+straddles two windows). For Mosaic v1 this is acceptable; v2 will
+offer sliding-window / token-bucket variants.
+
+`RateLimit.FromMap(Map<string, string>)` for the `[security.rate_limit]`
+TOML table:
+
+```toml
+[security.rate_limit]
+enabled       = true
+rps           = 100                        # shortcut: 100 per 1 s
+# OR explicit max + window:
+# max_requests  = 1000
+# window_sec    = 60
+key_strategy  = "ip"                       # only one supported today
+```
+
+When `enabled = false`, returns `RateLimit.Disabled()` regardless of
+other keys. `rps` is a shortcut for `max_requests=N, window_sec=1`.
