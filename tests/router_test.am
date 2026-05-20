@@ -130,6 +130,40 @@ public class Program {
             Console.WriteLine("[FAIL] session round-trip")
         }
 
+        // ── Session cookie attrs (v0.8.1) ────────────────────────
+        let store2 = new MemorySessionStore()
+            .WithCookieName("custom_sess")
+            .WithCookieSecure(false)
+            .WithCookieSameSite("Strict")
+            .WithCookiePath("/app")
+            .WithCookieMaxAge(3600)
+        let cookie: Cookie = store2.MakeCookie("token_xyz")
+        if (cookie.Name == "custom_sess"
+            && cookie.Value == "token_xyz"
+            && cookie.SameSite == "Strict"
+            && cookie.Path == "/app"
+            && cookie.MaxAgeSec == 3600
+            && !cookie.Secure
+            && cookie.HttpOnly) {
+            Console.WriteLine("[PASS] MakeCookie carries store attrs")
+        } else {
+            Console.WriteLine("[FAIL] MakeCookie shape: name=" + cookie.Name)
+        }
+
+        // ── FromMap composes the same attrs from a TOML map ──────
+        let cfg: Map<string, string> = new Map<string, string>()
+        cfg.Set("cookie_name", "frommap_sess")
+        cfg.Set("cookie_secure", "false")
+        cfg.Set("cookie_max_age", "7200")
+        let store3 = MemorySessionStore.FromMap(cfg)
+        if (store3.CookieName == "frommap_sess"
+            && !store3.CookieSecure
+            && store3.CookieMaxAge == 7200) {
+            Console.WriteLine("[PASS] MemorySessionStore.FromMap composes attrs")
+        } else {
+            Console.WriteLine("[FAIL] FromMap shape: " + store3.CookieName)
+        }
+
         Console.WriteLine("done")
     }
 }
