@@ -1,0 +1,165 @@
+// amalgame-web — WebApp orchestrator (v0.8.0).
+//
+// Centralizes the middleware pipeline. Without this, a user has to
+// re-implement RateLimit → Cors preflight → Csrf → handler →
+// SecurityHeaders → Cors response → Csrf cookie EVERY time they
+// write an accept loop. WebApp does it once, the right way.
+//
+// Pipeline order (fixed for v0.8.0 — custom ordering planned for v0.9):
+//
+//   request →
+//     1. RateLimit.Check         (429 if over limit)
+//     2. Cors.Preflight          (204 if OPTIONS preflight matches)
+//     3. Csrf.Validate           (403 if token missing/mismatched)
+//     4. Router.Match + handler  (404 if no route)
+//     5. Csrf.EnsureToken        (sets cookie on response if absent)
+//     6. SecurityHeaders.Apply   (stamps CSP / HSTS / etc.)
+//     7. Cors.Apply              (adds Allow-Origin / Vary)
+//   → response
+//
+// Steps 1-3 can short-circuit (return non-null HttpResponse); the
+// pipeline still runs the response-side middlewares (5-7) on the
+// short-circuited response so the rejecter still carries the right
+// security headers + CORS info.
+//
+// Usage:
+//
+//     let app = WebApp.New()
+//         .WithSecurityHeaders(SecurityHeaders.StrictHtml())
+//         .WithCors(Cors.Strict().AddOrigin("https://app.example.com"))
+//         .WithRateLimit(RateLimit.PerIp(100, 60))
+//         .WithCsrf(Csrf.Default())
+//         .Get("/",          ctx => HttpResponse.New().Text("hi"))
+//         .Get("/users/:id", ctx => HttpResponse.New().Text("user " + ctx.Param("id")))
+//         .Post("/users",    ctx => HttpResponse.New().Status(201).Json("{}"))
+//
+//     // in the accept loop:
+//     while (true) {
+//         let conn = TcpServer_Accept(srv)
+//         let raw  = TcpConn_Receive(conn, 65536)
+//         let req  = HttpParser.ParseFull(raw)
+//         let resp = (req == null)
+//             ? HttpResponse.New().Status(400).Text("Bad Request")
+//             : app.Handle(req)
+//         TcpConn_Send(conn, resp.Render())
+//         TcpConn_Close(conn)
+//     }
+//
+// Middleware fields are nullable — `null` = not configured = skip
+// that step. So `WebApp.New()` with no With* calls runs only the
+// router + a 404 handler, which is a valid minimal app.
+
+namespace Amalgame.Web
+
+import Amalgame.Collections
+import Amalgame.String
+
+public class WebApp {
+    public Routes:          Router
+    public Headers:         SecurityHeaders   // null = no security headers
+    public CorsCfg:         Cors              // null = no CORS handling
+    public CsrfCfg:         Csrf              // null = no CSRF validation
+    public Limiter:         RateLimit         // null = no rate limit
+    public State:           Map<string, string>  // app-level shared state
+
+    public WebApp() {
+        this.Routes  = new Router()
+        this.Headers = null
+        this.CorsCfg = null
+        this.CsrfCfg = null
+        this.Limiter = null
+        this.State   = new Map<string, string>()
+    }
+
+    public static WebApp New() { return new WebApp() }
+
+    // ── Middleware wiring ─────────────────────────────
+    public WebApp WithSecurityHeaders(SecurityHeaders sec) { this.Headers = sec;  return this }
+    public WebApp WithCors(Cors c)                         { this.CorsCfg = c;    return this }
+    public WebApp WithCsrf(Csrf c)                         { this.CsrfCfg = c;    return this }
+    public WebApp WithRateLimit(RateLimit rl)              { this.Limiter = rl;   return this }
+
+    // ── Shared state (app-level k/v, exposed to handlers via ctx.State) ──
+    public WebApp WithState(string key, string value) {
+        this.State.Set(key, value)
+        return this
+    }
+
+    // ── Route registration (mirrors Router's surface for fluency) ──
+    public WebApp Get(string path, Closure<WebContext, HttpResponse> handler)    { this.Routes.Get(path, handler);    return this }
+    public WebApp Post(string path, Closure<WebContext, HttpResponse> handler)   { this.Routes.Post(path, handler);   return this }
+    public WebApp Put(string path, Closure<WebContext, HttpResponse> handler)    { this.Routes.Put(path, handler);    return this }
+    public WebApp Patch(string path, Closure<WebContext, HttpResponse> handler)  { this.Routes.Patch(path, handler);  return this }
+    public WebApp Delete(string path, Closure<WebContext, HttpResponse> handler) { this.Routes.Delete(path, handler); return this }
+
+    // ── The orchestrator ─────────────────────────────
+    // Runs the configured pipeline on `req` and returns the final
+    // HttpResponse. Never throws — every failure mode produces a
+    // proper HttpResponse so the caller can blindly `.Render()` and
+    // ship it.
+    public HttpResponse Handle(HttpRequest req) {
+        // 1. RateLimit. Cheapest reject — go first.
+        if (this.Limiter != null) {
+            let limited: HttpResponse = this.Limiter.Check(req)
+            if (limited != null) {
+                return this.applyResponseMiddlewares(req, limited)
+            }
+        }
+
+        // 2. Cors preflight. Handled before any handler runs because
+        // OPTIONS preflights shouldn't even reach the route table.
+        if (this.CorsCfg != null) {
+            let pf: HttpResponse = this.CorsCfg.Preflight(req)
+            if (pf != null) {
+                return this.applyResponseMiddlewares(req, pf)
+            }
+        }
+
+        // 3. Csrf. State-changing methods are gated here.
+        if (this.CsrfCfg != null) {
+            let forbid: HttpResponse = this.CsrfCfg.Validate(req)
+            if (forbid != null) {
+                return this.applyResponseMiddlewares(req, forbid)
+            }
+        }
+
+        // 4. Route match + handler. Build a fresh WebContext per
+        // request — it carries the path params + a snapshot of the
+        // app-level state.
+        let m: RouteMatch = this.Routes.Match(req.Method, req.Path)
+        var resp: HttpResponse
+        if (m == null) {
+            resp = HttpResponse.New().Status(404).Text("Not found")
+        } else {
+            let ctx = new WebContext()
+            ctx.Params = m.Params
+            // Shallow-copy app state into ctx for read access.
+            let keys: List<string> = this.State.Keys()
+            let kn: int = keys.Count()
+            for i in 0..kn {
+                let k: string = keys.Get(i)
+                ctx.State.Set(k, this.State.Get(k))
+            }
+            resp = m.Route.Handler(ctx)
+        }
+
+        return this.applyResponseMiddlewares(req, resp)
+    }
+
+    // ── Internal: response-side middleware chain ─────
+    // Csrf.EnsureToken first (sets cookie if absent) so SecurityHeaders
+    // can then stamp Set-Cookie alongside CSP etc. Cors.Apply last
+    // so its Vary: Origin sits next to the other headers.
+    private HttpResponse applyResponseMiddlewares(HttpRequest req, HttpResponse resp) {
+        if (this.CsrfCfg != null) {
+            this.CsrfCfg.EnsureToken(req, resp)
+        }
+        if (this.Headers != null) {
+            this.Headers.Apply(resp)
+        }
+        if (this.CorsCfg != null) {
+            this.CorsCfg.Apply(req, resp)
+        }
+        return resp
+    }
+}

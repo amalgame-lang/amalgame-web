@@ -1,0 +1,182 @@
+// Unit tests for WebApp orchestrator (v0.8.0).
+//
+// Verifies the pipeline order + short-circuit behavior:
+//   - Empty WebApp routes a request → 404 with no extra headers
+//   - WithSecurityHeaders adds CSP etc. on successful responses
+//   - WithCors handles OPTIONS preflight (short-circuit before handler)
+//   - WithCsrf gates POST without token (short-circuit 403)
+//   - WithRateLimit short-circuits when over limit
+//   - Short-circuited responses STILL get response-side middlewares
+//     (a 429 still carries SecurityHeaders / CORS info)
+//   - Successful response stamps EnsureToken cookie
+//   - Handler can inject app-level state into ctx via WithState
+
+namespace Tests
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.Net.Http
+import Amalgame.Web
+
+public class Program {
+    public static void Main(string[] args) {
+        Console.WriteLine("amalgame-web — WebApp tests")
+
+        // ── 1. Empty WebApp: route hit returns handler's response ─
+        let app1 = WebApp.New()
+            .Get("/hi", ctx => HttpResponse.New().Text("hello"))
+        let req1 = new HttpRequest()
+        req1.Method = "GET"
+        req1.Path   = "/hi"
+        let r1: HttpResponse = app1.Handle(req1)
+        if (r1.StatusCode == 200 && r1.BodyText == "hello") {
+            Console.WriteLine("[PASS] empty WebApp routes handler")
+        } else {
+            Console.WriteLine("[FAIL] empty WebApp shape: status=" + String_FromInt(r1.StatusCode))
+        }
+
+        // ── 2. Empty WebApp: route miss returns 404 ───────────────
+        let req2 = new HttpRequest()
+        req2.Method = "GET"
+        req2.Path   = "/missing"
+        let r2: HttpResponse = app1.Handle(req2)
+        if (r2.StatusCode == 404) {
+            Console.WriteLine("[PASS] route miss → 404")
+        } else {
+            Console.WriteLine("[FAIL] 404 path got " + String_FromInt(r2.StatusCode))
+        }
+
+        // ── 3. SecurityHeaders applied on a successful response ──
+        let app3 = WebApp.New()
+            .WithSecurityHeaders(SecurityHeaders.StrictHtml())
+            .Get("/", ctx => HttpResponse.New().Html("<p>x</p>"))
+        let req3 = new HttpRequest()
+        req3.Method = "GET"
+        req3.Path   = "/"
+        let r3: HttpResponse = app3.Handle(req3)
+        if (r3.Headers.Has("Content-Security-Policy")
+            && r3.Headers.Get("X-Frame-Options") == "DENY") {
+            Console.WriteLine("[PASS] SecurityHeaders stamped on 200")
+        } else {
+            Console.WriteLine("[FAIL] SecurityHeaders missing")
+        }
+
+        // ── 4. Same applies to 404 responses ──────────────────────
+        let req4 = new HttpRequest()
+        req4.Method = "GET"
+        req4.Path   = "/no-such-route"
+        let r4: HttpResponse = app3.Handle(req4)
+        if (r4.StatusCode == 404 && r4.Headers.Has("Content-Security-Policy")) {
+            Console.WriteLine("[PASS] SecurityHeaders also stamped on 404")
+        } else {
+            Console.WriteLine("[FAIL] 404 missing CSP")
+        }
+
+        // ── 5. CORS preflight short-circuits before handler ──────
+        // We can't easily assert "handler not called" without
+        // multi-statement lambdas; instead we check that the
+        // response is a 204 CORS preflight (not 200 from the handler)
+        // — proves the short-circuit fired.
+        let app5 = WebApp.New()
+            .WithCors(Cors.Strict().AddOrigin("https://app.example.com"))
+            .Get("/api", ctx => HttpResponse.New().Status(200).Text("api-handler-was-called"))
+        let req5 = new HttpRequest()
+        req5.Method = "OPTIONS"
+        req5.Path   = "/api"
+        req5.Headers.Set("origin", "https://app.example.com")
+        req5.Headers.Set("access-control-request-method", "GET")
+        let r5: HttpResponse = app5.Handle(req5)
+        if (r5.StatusCode == 204
+            && r5.Headers.Get("Access-Control-Allow-Origin") == "https://app.example.com"
+            && r5.BodyText == "") {
+            Console.WriteLine("[PASS] CORS preflight short-circuits (204, empty body)")
+        } else {
+            Console.WriteLine("[FAIL] preflight: status=" + String_FromInt(r5.StatusCode) + " body=" + r5.BodyText)
+        }
+
+        // ── 6. CSRF blocks POST without token ────────────────────
+        let app6 = WebApp.New()
+            .WithCsrf(Csrf.Default())
+            .Post("/submit", ctx => HttpResponse.New().Text("ok"))
+        let req6 = new HttpRequest()
+        req6.Method = "POST"
+        req6.Path   = "/submit"
+        let r6: HttpResponse = app6.Handle(req6)
+        if (r6.StatusCode == 403) {
+            Console.WriteLine("[PASS] CSRF blocks POST without token → 403")
+        } else {
+            Console.WriteLine("[FAIL] CSRF didn't block: " + String_FromInt(r6.StatusCode))
+        }
+
+        // ── 7. GET sets CSRF cookie (EnsureToken) ────────────────
+        let req7 = new HttpRequest()
+        req7.Method = "GET"
+        req7.Path   = "/something-not-routed"
+        let r7: HttpResponse = app6.Handle(req7)
+        if (r7.Headers.Has("Set-Cookie")) {
+            Console.WriteLine("[PASS] CSRF cookie set on GET response")
+        } else {
+            Console.WriteLine("[FAIL] CSRF EnsureToken didn't fire")
+        }
+
+        // ── 8. RateLimit short-circuits when over limit ──────────
+        let app8 = WebApp.New()
+            .WithRateLimit(RateLimit.PerIp(2, 60))
+            .Get("/", ctx => HttpResponse.New().Text("ok"))
+        let req8 = new HttpRequest()
+        req8.Method = "GET"
+        req8.Path   = "/"
+        req8.RemoteAddr = "192.0.2.1:1234"
+        app8.Handle(req8)              // count = 1
+        app8.Handle(req8)              // count = 2
+        let r8: HttpResponse = app8.Handle(req8)   // over limit
+        if (r8.StatusCode == 429 && r8.Headers.Has("Retry-After")) {
+            Console.WriteLine("[PASS] RateLimit 429 + Retry-After through WebApp")
+        } else {
+            Console.WriteLine("[FAIL] rate limit didn't fire: " + String_FromInt(r8.StatusCode))
+        }
+
+        // ── 9. Combined: all four middlewares stack cleanly ──────
+        let app9 = WebApp.New()
+            .WithSecurityHeaders(SecurityHeaders.StrictApi())
+            .WithCors(Cors.Strict().AddOrigin("https://app.example.com"))
+            .WithCsrf(Csrf.Default())
+            .WithRateLimit(RateLimit.PerIp(100, 60))
+            .Get("/", ctx => HttpResponse.New().Json("{\"ok\":true}"))
+        let req9 = new HttpRequest()
+        req9.Method = "GET"
+        req9.Path   = "/"
+        req9.RemoteAddr = "10.0.0.1:5555"
+        req9.Headers.Set("origin", "https://app.example.com")
+        let r9: HttpResponse = app9.Handle(req9)
+        // Check each header in turn. (amc's parser doesn't like
+        // EOL `//` comments inside a multi-line && expression, so
+        // we break the assertion across consecutive ifs instead.)
+        let h9_xfo: bool = r9.Headers.Has("X-Frame-Options")
+        let h9_vary: bool = r9.Headers.Has("Vary")
+        let h9_cookie: bool = r9.Headers.Has("Set-Cookie")
+        let h9_acao: bool = r9.Headers.Has("Access-Control-Allow-Origin")
+        if (r9.StatusCode == 200 && h9_xfo && h9_vary && h9_cookie && h9_acao) {
+            Console.WriteLine("[PASS] all four middlewares compose on 200")
+        } else {
+            Console.WriteLine("[FAIL] combined stack incomplete")
+        }
+
+        // ── 10. WithState injects key/value into ctx.State ───────
+        let app10 = WebApp.New()
+            .WithState("db_url", "postgres://localhost/app")
+            .WithState("env", "test")
+            .Get("/check", (ctx: WebContext) => HttpResponse.New().Text(ctx.StateOf("env") + ":" + ctx.StateOf("db_url")))
+        let req10 = new HttpRequest()
+        req10.Method = "GET"
+        req10.Path   = "/check"
+        let r10: HttpResponse = app10.Handle(req10)
+        if (r10.BodyText == "test:postgres://localhost/app") {
+            Console.WriteLine("[PASS] WithState propagates to ctx.State")
+        } else {
+            Console.WriteLine("[FAIL] WithState got body: " + r10.BodyText)
+        }
+
+        Console.WriteLine("done")
+    }
+}
