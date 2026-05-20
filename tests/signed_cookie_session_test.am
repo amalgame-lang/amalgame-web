@@ -126,6 +126,104 @@ public class Program {
             Console.WriteLine("[FAIL] FromMap shape: " + store3.CookieName)
         }
 
+        // ─────────────────────────────────────────────────
+        // v0.8.5 — Encrypted (AEAD AES-256-GCM) mode
+        // ─────────────────────────────────────────────────
+
+        // ── 9. Encrypted roundtrip ───────────────────────────────
+        let enc = new SignedCookieSessionStore("aead-secret-key").WithEncrypted(true)
+        let se = new Session("ignored")
+        se.Set("user_id", "42")
+        se.Set("role", "admin")
+        se.Set("email", "alice@example.com")
+        let cipherCookie: string = enc.Encode(se)
+        let de: Session = enc.Decode(cipherCookie)
+        if (de != null
+            && de.Get("user_id") == "42"
+            && de.Get("role") == "admin"
+            && de.Get("email") == "alice@example.com") {
+            Console.WriteLine("[PASS] encrypted roundtrip recovers data")
+        } else {
+            Console.WriteLine("[FAIL] encrypted roundtrip lost data")
+        }
+
+        // ── 10. Encrypted cookie hides plaintext ──────────────────
+        // The cookie value should NOT contain "user_id" / "admin"
+        // anywhere — that's the whole point of encryption.
+        if (String_Contains(cipherCookie, "user_id")
+            || String_Contains(cipherCookie, "admin")
+            || String_Contains(cipherCookie, "alice")) {
+            Console.WriteLine("[FAIL] encrypted cookie leaks plaintext")
+        } else {
+            Console.WriteLine("[PASS] encrypted cookie hides plaintext")
+        }
+
+        // ── 11. Encryption is non-deterministic (fresh nonce) ───
+        let c1: string = enc.Encode(se)
+        let c2: string = enc.Encode(se)
+        if (c1 != c2) {
+            Console.WriteLine("[PASS] encrypted output uses fresh nonce")
+        } else {
+            Console.WriteLine("[FAIL] encrypted output identical — nonce reuse!")
+        }
+
+        // ── 12. Wrong-secret reject ───────────────────────────────
+        let enc2 = new SignedCookieSessionStore("different-key").WithEncrypted(true)
+        let badDec: Session = enc2.Decode(cipherCookie)
+        if (badDec == null) {
+            Console.WriteLine("[PASS] encrypted wrong-secret reject")
+        } else {
+            Console.WriteLine("[FAIL] encrypted wrong-secret accepted")
+        }
+
+        // ── 13. Tamper detection in encrypted mode ───────────────
+        // Flip a hex char in the ciphertext portion (after the
+        // dot at position 24). The GCM tag MUST fail.
+        let n5: int = String_Length(cipherCookie)
+        // Pick a char roughly in the middle, in the ct section.
+        let pivot: int = 30
+        var flipped: string = String_Substring(cipherCookie, 0, pivot)
+        let orig: string = String_CharAt1(cipherCookie, pivot)
+        var newCh: string = "0"
+        if (orig == "0") { newCh = "1" }
+        flipped = flipped + newCh + String_Substring(cipherCookie, pivot + 1, n5 - pivot - 1)
+        let tdec: Session = enc.Decode(flipped)
+        if (tdec == null) {
+            Console.WriteLine("[PASS] encrypted tamper rejected")
+        } else {
+            Console.WriteLine("[FAIL] encrypted tamper accepted")
+        }
+
+        // ── 14. Malformed encrypted cookies rejected ──────────────
+        if (enc.Decode("") == null
+            && enc.Decode("garbage") == null
+            && enc.Decode("zzzzzzzzzzzzzzzzzzzzzzzz.deadbeef") == null) {
+            Console.WriteLine("[PASS] malformed encrypted cookies rejected")
+        } else {
+            Console.WriteLine("[FAIL] malformed encrypted accepted")
+        }
+
+        // ── 15. Empty encrypted session roundtrip ─────────────────
+        let emptySe = new Session("ignored")
+        let ec: string = enc.Encode(emptySe)
+        let ed: Session = enc.Decode(ec)
+        if (ed != null && ed.Data.Size() == 0) {
+            Console.WriteLine("[PASS] empty encrypted session roundtrip")
+        } else {
+            Console.WriteLine("[FAIL] empty encrypted lost or polluted")
+        }
+
+        // ── 16. FromMap honors encrypted=true ─────────────────────
+        let cfg2: Map<string, string> = new Map<string, string>()
+        cfg2.Set("secret", "ek")
+        cfg2.Set("encrypted", "true")
+        let store4 = SignedCookieSessionStore.FromMap(cfg2)
+        if (store4.Encrypted && store4.Secret == "ek") {
+            Console.WriteLine("[PASS] FromMap encrypted=true")
+        } else {
+            Console.WriteLine("[FAIL] FromMap encrypted flag wrong")
+        }
+
         Console.WriteLine("done")
     }
 }
