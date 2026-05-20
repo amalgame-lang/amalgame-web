@@ -10,6 +10,7 @@ namespace Amalgame.Web
 import Amalgame.Collections
 import Amalgame.String
 import Amalgame.DateTime
+import Amalgame.Database.NoSQL.Redis
 
 // ─────────────────────────────────────────────────────────────────
 // RateLimitBucket — per-key window state. Internal to RateLimit but
@@ -61,16 +62,28 @@ public class RateLimitBucket {
 // ─────────────────────────────────────────────────────────────────
 
 public class RateLimit {
-    public MaxRequests:  int
-    public WindowNanos:  int
-    public KeyStrategy:  string                          // "ip" today
-    public Store:        Map<string, RateLimitBucket>    // key → bucket
+    public MaxRequests:    int
+    public WindowNanos:    int
+    public KeyStrategy:    string                          // "ip" today
+    public Store:          Map<string, RateLimitBucket>    // key → bucket (memory backend)
+
+    // Backend selection (v0.8.4):
+    //   "memory" (default) — in-process Map, single worker
+    //   "redis"            — INCR + EXPIRE on a Redis key per window
+    public Backend:        string
+    public RedisHost:      string
+    public RedisPort:      int
+    public RedisKeyPrefix: string
 
     public RateLimit() {
-        this.MaxRequests = 0
-        this.WindowNanos = 0
-        this.KeyStrategy = "ip"
-        this.Store       = new Map<string, RateLimitBucket>()
+        this.MaxRequests    = 0
+        this.WindowNanos    = 0
+        this.KeyStrategy    = "ip"
+        this.Store          = new Map<string, RateLimitBucket>()
+        this.Backend        = "memory"
+        this.RedisHost      = "127.0.0.1"
+        this.RedisPort      = 6379
+        this.RedisKeyPrefix = "mosaic:rl"
     }
 
     // Per-IP preset. `windowSec` is the window length in seconds.
@@ -91,9 +104,13 @@ public class RateLimit {
     }
 
     // ── Builders ──────────────────────────────────────
-    public RateLimit WithMaxRequests(int n)        { this.MaxRequests = n;             return this }
-    public RateLimit WithWindowSec(int s)          { this.WindowNanos = s * 1000000000; return this }
-    public RateLimit WithKeyStrategy(string s)     { this.KeyStrategy = s;             return this }
+    public RateLimit WithMaxRequests(int n)        { this.MaxRequests    = n;             return this }
+    public RateLimit WithWindowSec(int s)          { this.WindowNanos    = s * 1000000000; return this }
+    public RateLimit WithKeyStrategy(string s)     { this.KeyStrategy    = s;             return this }
+    public RateLimit WithBackend(string b)         { this.Backend        = b;             return this }
+    public RateLimit WithRedisHost(string h)       { this.RedisHost      = h;             return this }
+    public RateLimit WithRedisPort(int p)          { this.RedisPort      = p;             return this }
+    public RateLimit WithRedisKeyPrefix(string p)  { this.RedisKeyPrefix = p;             return this }
 
     // ── Key extraction ────────────────────────────────
     // Strip ":port" from "192.0.2.1:54321". Returns "" if req has
@@ -121,17 +138,26 @@ public class RateLimit {
     // ── The throttle decision ─────────────────────────
     // Returns a 429 HttpResponse when the request exceeds the
     // limit, else null. Always returns null when MaxRequests=0
-    // (Disabled preset).
+    // (Disabled preset). Dispatches on `Backend`.
     public HttpResponse Check(HttpRequest req) {
         if (this.MaxRequests <= 0) { return null }
         let key: string = this.KeyFor(req)
         if (key == "") { return null }     // unidentifiable, allow
+
+        if (this.Backend == "redis") {
+            return this.CheckRedis(key)
+        }
+        return this.CheckMemory(key)
+    }
+
+    // Memory backend — fixed-window per-key counter held in `Store`.
+    // Monotonic clock from amalgame-datetime; immune to NTP/DST.
+    private HttpResponse CheckMemory(string key) {
         let now: int = DateTime.NowMonotonicNanos()
 
         var bucket: RateLimitBucket = null
         if (this.Store.Has(key)) {
             bucket = this.Store.Get(key)
-            // Rotate window if it's elapsed.
             if (now - bucket.WindowStartNanos >= this.WindowNanos) {
                 bucket.Count = 0
                 bucket.WindowStartNanos = now
@@ -143,31 +169,80 @@ public class RateLimit {
         }
 
         if (bucket.Count >= this.MaxRequests) {
-            // 429 Too Many Requests. Retry-After in seconds — round
-            // up the remaining window. Always include Vary: not needed.
             let elapsedNanos: int = now - bucket.WindowStartNanos
             var remainingSec: int = (this.WindowNanos - elapsedNanos) / 1000000000
             if (remainingSec < 1) { remainingSec = 1 }
-            let resp = HttpResponse.New()
-                .Status(429)
-                .Header("Retry-After", String_FromInt(remainingSec))
-                .Text("rate limit exceeded")
-            return resp
+            return RateLimit.Make429(remainingSec)
         }
-
         bucket.Count = bucket.Count + 1
         return null
     }
 
+    // Redis backend — fixed-window counter using INCR + EXPIRE.
+    //
+    // Algorithm (Stripe's "leaky bucket lite" / canonical Redis recipe):
+    //   1. INCR <prefix>:<key>          → atomic, returns new count
+    //   2. if count == 1: EXPIRE key <window_sec>
+    //   3. if count > max: 429 with Retry-After = window_sec
+    //                       (pessimistic — actual TTL <= window_sec)
+    //
+    // The race window between INCR and EXPIRE is fine: if the
+    // process dies between the two, the key has no TTL and stays
+    // forever for that one IP — degradation, not a security
+    // hole. A future v2 can swap to a Lua script for atomic
+    // INCR-and-set-expire-if-new.
+    //
+    // Connection model mirrors RedisSessionStore: open + ops +
+    // close per request. ~50µs on localhost. Pool when amc can
+    // type an opaque C handle as a class field.
+    //
+    // If Redis is down: fail-OPEN (return null = allow). Failing
+    // closed would let one downed cache turn every endpoint into
+    // a 429 hot mess — worse than ungated traffic during the
+    // outage. Production should monitor Redis health separately.
+    private HttpResponse CheckRedis(string key) {
+        let r = Redis.Open(this.RedisHost, this.RedisPort)
+        if (!Redis.IsOpen(r)) {
+            Redis.Close(r)
+            return null
+        }
+        let rkey: string = this.RedisKeyPrefix + ":" + key
+        let count: int = Redis.Incr(r, rkey)
+        if (count == 1) {
+            let windowSec: int = this.WindowNanos / 1000000000
+            Redis.Expire(r, rkey, windowSec)
+        }
+        Redis.Close(r)
+        if (count > this.MaxRequests) {
+            var remainingSec: int = this.WindowNanos / 1000000000
+            if (remainingSec < 1) { remainingSec = 1 }
+            return RateLimit.Make429(remainingSec)
+        }
+        return null
+    }
+
+    // Shared 429 builder — kept private + static so both backends
+    // emit identical responses.
+    private static HttpResponse Make429(int retryAfterSec) {
+        return HttpResponse.New()
+            .Status(429)
+            .Header("Retry-After", String_FromInt(retryAfterSec))
+            .Text("rate limit exceeded")
+    }
+
     // ── FromMap — TOML/env friendly ───────────────────
     // Recognised keys (all optional, unknown ignored):
-    //   enabled         "true" | "false"  — when false, returns Disabled()
-    //   preset          "per_ip" | "disabled"
-    //   rps             requests-per-second (becomes max=rps, window=1s)
-    //                   OR use max_requests + window_sec for full control
-    //   max_requests    int
-    //   window_sec      int
-    //   key_strategy    "ip" (only one supported today)
+    //   enabled            "true" | "false"  — when false, returns Disabled()
+    //   preset             "per_ip" | "disabled"
+    //   rps                requests-per-second (becomes max=rps, window=1s)
+    //                      OR use max_requests + window_sec for full control
+    //   max_requests       int
+    //   window_sec         int
+    //   key_strategy       "ip" (only one supported today)
+    //   backend            "memory" | "redis"  (v0.8.4)
+    //   redis_host         string (default "127.0.0.1")
+    //   redis_port         int    (default 6379)
+    //   redis_key_prefix   string (default "mosaic:rl")
     public static RateLimit FromMap(Map<string, string> cfg) {
         if (cfg.Has("enabled") && cfg.Get("enabled") == "false") {
             return RateLimit.Disabled()
@@ -183,9 +258,25 @@ public class RateLimit {
             rl.MaxRequests = String_ToInt(cfg.Get("rps"))
             rl.WindowNanos = 1000000000   // 1 second
         }
-        if (cfg.Has("max_requests")) { rl.MaxRequests = String_ToInt(cfg.Get("max_requests")) }
-        if (cfg.Has("window_sec"))   { rl.WindowNanos = String_ToInt(cfg.Get("window_sec")) * 1000000000 }
-        if (cfg.Has("key_strategy")) { rl.KeyStrategy = cfg.Get("key_strategy") }
+        if (cfg.Has("max_requests"))     { rl.MaxRequests    = String_ToInt(cfg.Get("max_requests")) }
+        if (cfg.Has("window_sec"))       { rl.WindowNanos    = String_ToInt(cfg.Get("window_sec")) * 1000000000 }
+        if (cfg.Has("key_strategy"))     { rl.KeyStrategy    = cfg.Get("key_strategy") }
+        if (cfg.Has("backend"))          { rl.Backend        = cfg.Get("backend") }
+        if (cfg.Has("redis_host"))       { rl.RedisHost      = cfg.Get("redis_host") }
+        if (cfg.Has("redis_port"))       { rl.RedisPort      = String_ToInt(cfg.Get("redis_port")) }
+        if (cfg.Has("redis_key_prefix")) { rl.RedisKeyPrefix = cfg.Get("redis_key_prefix") }
         return rl
+    }
+
+    // Connectivity probe for the Redis backend — open + ping + close.
+    // Mirrors RedisSessionStore.Probe(). Returns false when memory
+    // backend or when Redis is unreachable.
+    public bool Probe() {
+        if (this.Backend != "redis") { return false }
+        let r = Redis.Open(this.RedisHost, this.RedisPort)
+        if (!Redis.IsOpen(r)) { Redis.Close(r); return false }
+        let ok: bool = Redis.Ping(r)
+        Redis.Close(r)
+        return ok
     }
 }
