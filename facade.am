@@ -433,6 +433,57 @@ public class SecurityHeaders {
     public SecurityHeaders WithCoop(string value)              { this.Coop = value;                    return this }
     public SecurityHeaders WithCoep(string value)              { this.Coep = value;                    return this }
 
+    // Build a SecurityHeaders from a flat key/value map — designed for
+    // config-file driven instantiation. The Mosaic CLI flattens its
+    // TOML `[security.headers]` table to this shape and calls FromMap.
+    // The library itself stays TOML-agnostic.
+    //
+    // Recognised keys (all optional):
+    //   preset                       "strict_html" | "strict_api"
+    //                                Starts from that preset; further
+    //                                keys then override individual
+    //                                fields. Without a preset, defaults
+    //                                are all-off.
+    //   csp                          full CSP policy string
+    //   frame_options                "DENY" | "SAMEORIGIN"
+    //   content_type_options         "true" | "false" — toggles nosniff
+    //   referrer_policy              e.g. "no-referrer"
+    //   permissions_policy           e.g. "camera=(), microphone=()"
+    //   coop                         e.g. "same-origin"
+    //   coep                         e.g. "require-corp"
+    //   hsts                         pre-composed value, OR ↓
+    //   hsts_max_age                 seconds (int as string)
+    //   hsts_include_subdomains      "true" | "false"
+    //   hsts_preload                 "true" | "false"
+    //
+    // Unknown keys are ignored (forward-compat with future fields).
+    public static SecurityHeaders FromMap(Map<string, string> cfg) {
+        var h: SecurityHeaders = new SecurityHeaders()
+        if (cfg.Has("preset")) {
+            let p: string = cfg.Get("preset")
+            if (p == "strict_html") { h = SecurityHeaders.StrictHtml() }
+            else if (p == "strict_api") { h = SecurityHeaders.StrictApi() }
+        }
+        if (cfg.Has("csp"))                  { h.ContentSecurityPolicy = cfg.Get("csp") }
+        if (cfg.Has("frame_options"))        { h.FrameOptions          = cfg.Get("frame_options") }
+        if (cfg.Has("content_type_options")) { h.ContentTypeOptions    = (cfg.Get("content_type_options") == "true") }
+        if (cfg.Has("referrer_policy"))      { h.ReferrerPolicy        = cfg.Get("referrer_policy") }
+        if (cfg.Has("permissions_policy"))   { h.PermissionsPolicy     = cfg.Get("permissions_policy") }
+        if (cfg.Has("coop"))                 { h.Coop                  = cfg.Get("coop") }
+        if (cfg.Has("coep"))                 { h.Coep                  = cfg.Get("coep") }
+        // HSTS — accept either pre-composed `hsts=...` or
+        // (`hsts_max_age` + optional flags).
+        if (cfg.Has("hsts")) {
+            h.Hsts = cfg.Get("hsts")
+        } else if (cfg.Has("hsts_max_age")) {
+            let maxAge: int = String_ToInt(cfg.Get("hsts_max_age"))
+            let inclSub: bool = cfg.Has("hsts_include_subdomains") && cfg.Get("hsts_include_subdomains") == "true"
+            let preload: bool = cfg.Has("hsts_preload") && cfg.Get("hsts_preload") == "true"
+            h.WithHsts(maxAge, inclSub, preload)
+        }
+        return h
+    }
+
     // Stamp the configured headers onto `resp`. Skips empty fields
     // and headers the handler already set (handler wins). Returns
     // `resp` for chaining.

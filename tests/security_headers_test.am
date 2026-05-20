@@ -130,6 +130,74 @@ public class Program {
             Console.WriteLine("[FAIL] chained builder shape wrong")
         }
 
+        // ── 7. FromMap — empty map = empty builder ─────────────────
+        let cfg0 = new Map<string, string>()
+        let h0 = SecurityHeaders.FromMap(cfg0)
+        let r8 = HttpResponse.New().Text("h")
+        h0.Apply(r8)
+        if (!r8.Headers.Has("Content-Security-Policy") && !r8.Headers.Has("X-Frame-Options")) {
+            Console.WriteLine("[PASS] FromMap empty = no-op")
+        } else {
+            Console.WriteLine("[FAIL] FromMap empty leaked headers")
+        }
+
+        // ── 8. FromMap — preset + per-key override ─────────────────
+        let cfg1 = new Map<string, string>()
+        cfg1.Set("preset", "strict_html")
+        cfg1.Set("csp", "default-src https:")            // override the preset CSP
+        cfg1.Set("frame_options", "SAMEORIGIN")
+        let h1 = SecurityHeaders.FromMap(cfg1)
+        let r9 = HttpResponse.New().Html("<p>x</p>")
+        h1.Apply(r9)
+        if (r9.Headers.Get("Content-Security-Policy") == "default-src https:"
+            && r9.Headers.Get("X-Frame-Options") == "SAMEORIGIN"
+            && r9.Headers.Get("X-Content-Type-Options") == "nosniff"
+            && r9.Headers.Has("Referrer-Policy")) {
+            Console.WriteLine("[PASS] FromMap preset + overrides")
+        } else {
+            Console.WriteLine("[FAIL] FromMap preset compose got CSP=" + r9.Headers.Get("Content-Security-Policy") + " XFO=" + r9.Headers.Get("X-Frame-Options"))
+        }
+
+        // ── 9. FromMap — HSTS components ───────────────────────────
+        let cfg2 = new Map<string, string>()
+        cfg2.Set("hsts_max_age", "31536000")
+        cfg2.Set("hsts_include_subdomains", "true")
+        cfg2.Set("hsts_preload", "false")
+        let h2 = SecurityHeaders.FromMap(cfg2)
+        let r10 = HttpResponse.New().Text("x")
+        h2.Apply(r10)
+        if (r10.Headers.Get("Strict-Transport-Security") == "max-age=31536000; includeSubDomains") {
+            Console.WriteLine("[PASS] FromMap HSTS components")
+        } else {
+            Console.WriteLine("[FAIL] FromMap HSTS got: " + r10.Headers.Get("Strict-Transport-Security"))
+        }
+
+        // ── 10. FromMap — pre-composed HSTS wins over components ──
+        let cfg3 = new Map<string, string>()
+        cfg3.Set("hsts", "max-age=300")
+        cfg3.Set("hsts_max_age", "999")   // should be ignored when `hsts` is present
+        let h3 = SecurityHeaders.FromMap(cfg3)
+        let r11 = HttpResponse.New().Text("x")
+        h3.Apply(r11)
+        if (r11.Headers.Get("Strict-Transport-Security") == "max-age=300") {
+            Console.WriteLine("[PASS] FromMap pre-composed HSTS wins")
+        } else {
+            Console.WriteLine("[FAIL] FromMap HSTS precedence got: " + r11.Headers.Get("Strict-Transport-Security"))
+        }
+
+        // ── 11. FromMap — unknown keys ignored ─────────────────────
+        let cfg4 = new Map<string, string>()
+        cfg4.Set("frame_options", "DENY")
+        cfg4.Set("future_field_not_yet_supported", "ignore-me")
+        let h4 = SecurityHeaders.FromMap(cfg4)
+        let r12 = HttpResponse.New().Text("x")
+        h4.Apply(r12)
+        if (r12.Headers.Get("X-Frame-Options") == "DENY") {
+            Console.WriteLine("[PASS] FromMap ignores unknown keys")
+        } else {
+            Console.WriteLine("[FAIL] FromMap unknown-keys path broke known keys")
+        }
+
         Console.WriteLine("done")
     }
 }
