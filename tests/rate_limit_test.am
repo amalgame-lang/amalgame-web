@@ -1,0 +1,161 @@
+// Unit tests for RateLimit (v0.6.0).
+//
+// Verifies:
+//   - Disabled preset always allows
+//   - PerIp throttles when over the limit
+//   - 429 carries Retry-After header
+//   - Per-key isolation (different IPs don't share counters)
+//   - Window rotation: count resets after window elapses
+//   - KeyFor strips :port from RemoteAddr
+//   - FromMap (preset, rps shortcut, max+window full, disabled)
+
+namespace Tests
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.DateTime
+import Amalgame.Net.Http
+import Amalgame.Web
+
+public class Program {
+    public static void Main(string[] args) {
+        Console.WriteLine("amalgame-web — RateLimit tests")
+
+        // ── 1. Disabled preset always allows ──────────────────────
+        let dis = RateLimit.Disabled()
+        let req1 = new HttpRequest()
+        req1.RemoteAddr = "10.0.0.1:12345"
+        let r1: HttpResponse = dis.Check(req1)
+        if (r1 == null) {
+            Console.WriteLine("[PASS] Disabled allows")
+        } else {
+            Console.WriteLine("[FAIL] Disabled blocked")
+        }
+
+        // ── 2. KeyFor strips port ─────────────────────────────────
+        let rl = RateLimit.PerIp(3, 60)
+        let req2 = new HttpRequest()
+        req2.RemoteAddr = "192.0.2.5:54321"
+        if (rl.KeyFor(req2) == "192.0.2.5") {
+            Console.WriteLine("[PASS] KeyFor strips port")
+        } else {
+            Console.WriteLine("[FAIL] KeyFor got: " + rl.KeyFor(req2))
+        }
+
+        // ── 3. First N requests allowed, N+1 blocked ──────────────
+        let rl3 = RateLimit.PerIp(3, 60)
+        let req3 = new HttpRequest()
+        req3.RemoteAddr = "192.0.2.10:1234"
+        var allowedCount: int = 0
+        var i: int = 0
+        while (i < 5) {
+            let resp: HttpResponse = rl3.Check(req3)
+            if (resp == null) { allowedCount = allowedCount + 1 }
+            i = i + 1
+        }
+        if (allowedCount == 3) {
+            Console.WriteLine("[PASS] PerIp allows exactly MaxRequests")
+        } else {
+            Console.WriteLine("[FAIL] PerIp allowed " + String_FromInt(allowedCount) + " (expected 3)")
+        }
+
+        // ── 4. 4th request gets a 429 + Retry-After ──────────────
+        let rl4 = RateLimit.PerIp(2, 60)
+        let req4 = new HttpRequest()
+        req4.RemoteAddr = "192.0.2.20:1234"
+        rl4.Check(req4)
+        rl4.Check(req4)
+        let third: HttpResponse = rl4.Check(req4)
+        if (third != null && third.StatusCode == 429 && third.Headers.Has("Retry-After")) {
+            Console.WriteLine("[PASS] 429 + Retry-After on overflow")
+        } else {
+            Console.WriteLine("[FAIL] overflow shape")
+        }
+
+        // ── 5. Per-key isolation ─────────────────────────────────
+        let rl5 = RateLimit.PerIp(2, 60)
+        let reqA = new HttpRequest()
+        reqA.RemoteAddr = "10.0.0.1:1111"
+        let reqB = new HttpRequest()
+        reqB.RemoteAddr = "10.0.0.2:2222"
+        rl5.Check(reqA)
+        rl5.Check(reqA)
+        // reqA is now at limit. reqB should still be fresh.
+        let respB: HttpResponse = rl5.Check(reqB)
+        if (respB == null) {
+            Console.WriteLine("[PASS] per-key isolation")
+        } else {
+            Console.WriteLine("[FAIL] reqB blocked by reqA's count")
+        }
+
+        // ── 6. Missing RemoteAddr = allow (unidentifiable) ───────
+        let rl6 = RateLimit.PerIp(0, 60)        // even 0 max would block
+        let reqEmpty = new HttpRequest()
+        // RemoteAddr defaults to ""
+        let respEmpty: HttpResponse = rl6.Check(reqEmpty)
+        if (respEmpty == null) {
+            Console.WriteLine("[PASS] unidentifiable request allowed")
+        } else {
+            Console.WriteLine("[FAIL] empty addr blocked")
+        }
+
+        // ── 7. Window rotation: tiny window → second pass after sleep ──
+        // We can't actually sleep in the test (no portable sleep
+        // available + would slow the suite). Instead we hand-roll the
+        // state: mark the bucket's window as "1 second ago + window
+        // already elapsed" and verify Check rotates it.
+        let rl7 = RateLimit.PerIp(1, 1)         // 1 req per 1 sec window
+        let req7 = new HttpRequest()
+        req7.RemoteAddr = "172.16.0.1:9999"
+        rl7.Check(req7)                          // count = 1
+        let blocked: HttpResponse = rl7.Check(req7)
+        if (blocked == null) {
+            Console.WriteLine("[FAIL] second within window should have been blocked")
+        } else {
+            // Now backdate the window-start by 2 seconds (2_000_000_000 ns)
+            // so the next Check rotates.
+            let bucket: RateLimitBucket = rl7.Store.Get("172.16.0.1")
+            bucket.WindowStartNanos = bucket.WindowStartNanos - 2000000000
+            let afterRotate: HttpResponse = rl7.Check(req7)
+            if (afterRotate == null) {
+                Console.WriteLine("[PASS] window rotation resets count")
+            } else {
+                Console.WriteLine("[FAIL] window didn't rotate")
+            }
+        }
+
+        // ── 8. FromMap — rps shortcut ────────────────────────────
+        let cfg1 = new Map<string, string>()
+        cfg1.Set("rps", "50")
+        let r8 = RateLimit.FromMap(cfg1)
+        if (r8.MaxRequests == 50 && r8.WindowNanos == 1000000000) {
+            Console.WriteLine("[PASS] FromMap rps=50 → 50 per 1s window")
+        } else {
+            Console.WriteLine("[FAIL] FromMap rps got max=" + String_FromInt(r8.MaxRequests))
+        }
+
+        // ── 9. FromMap — explicit max + window ───────────────────
+        let cfg2 = new Map<string, string>()
+        cfg2.Set("max_requests", "100")
+        cfg2.Set("window_sec", "60")
+        let r9 = RateLimit.FromMap(cfg2)
+        if (r9.MaxRequests == 100 && r9.WindowNanos == 60000000000) {
+            Console.WriteLine("[PASS] FromMap max=100 window=60s")
+        } else {
+            Console.WriteLine("[FAIL] FromMap explicit got max=" + String_FromInt(r9.MaxRequests))
+        }
+
+        // ── 10. FromMap — enabled=false → Disabled ──────────────
+        let cfg3 = new Map<string, string>()
+        cfg3.Set("enabled", "false")
+        cfg3.Set("rps", "999")                   // should be ignored
+        let r10 = RateLimit.FromMap(cfg3)
+        if (r10.MaxRequests == 0) {
+            Console.WriteLine("[PASS] FromMap enabled=false → Disabled")
+        } else {
+            Console.WriteLine("[FAIL] FromMap enabled=false leaked")
+        }
+
+        Console.WriteLine("done")
+    }
+}
