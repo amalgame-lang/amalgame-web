@@ -9,6 +9,22 @@ namespace Amalgame.Web
 import Amalgame.Collections
 import Amalgame.String
 
+// v0.9.0: process-wide mutex protecting MemorySessionStore.Sessions
+// when Mosaic runs under Http1.ServeMt (multi-thread accept loop).
+// One global mutex covers every MemorySessionStore instance in the
+// process — fine in practice since a Mosaic app typically holds
+// exactly one. The lock has zero contention cost in single-thread
+// deployments (Http1.Serve), so it's always-on rather than gated
+// behind a flag — fewer ways to misconfigure.
+//
+// Mutex declared in a top-level @c { } block so the lifetime
+// matches the process. PTHREAD_MUTEX_INITIALIZER is the canonical
+// recursive-free static init; no need to init/destroy at runtime.
+@c {
+    #include <pthread.h>
+    static pthread_mutex_t amalgame_web_session_mu = PTHREAD_MUTEX_INITIALIZER;
+}
+
 // ─────────────────────────────────────────────────────────────────
 // Session — in-memory key/value store carried by a session cookie.
 //
@@ -112,10 +128,14 @@ public class MemorySessionStore {
     }
 
     // ── Session lifecycle ─────────────────────────────
-    // Find a session by id, or null.
+    // Find a session by id, or null. Thread-safe under
+    // Http1.ServeMt — wrapped in the process-wide session mutex.
     public Session Find(string id) {
-        if (this.Sessions.Has(id)) { return this.Sessions.Get(id) }
-        return null
+        var result: Session = null
+        @c { pthread_mutex_lock(&amalgame_web_session_mu); }
+        if (this.Sessions.Has(id)) { result = this.Sessions.Get(id) }
+        @c { pthread_mutex_unlock(&amalgame_web_session_mu); }
+        return result
     }
 
     // Create + register a new session with a caller-provided id.
@@ -123,14 +143,24 @@ public class MemorySessionStore {
     // can pass predictable ids.
     public Session Create(string id) {
         let s = new Session(id)
+        @c { pthread_mutex_lock(&amalgame_web_session_mu); }
         this.Sessions.Set(id, s)
+        @c { pthread_mutex_unlock(&amalgame_web_session_mu); }
         return s
     }
 
     // Remove a session.
     public void Destroy(string id) {
+        @c { pthread_mutex_lock(&amalgame_web_session_mu); }
         this.Sessions.Remove(id)
+        @c { pthread_mutex_unlock(&amalgame_web_session_mu); }
     }
 
-    public int Size() { return this.Sessions.Size() }
+    public int Size() {
+        var n: int = 0
+        @c { pthread_mutex_lock(&amalgame_web_session_mu); }
+        n = this.Sessions.Size()
+        @c { pthread_mutex_unlock(&amalgame_web_session_mu); }
+        return n
+    }
 }
