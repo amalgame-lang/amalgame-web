@@ -38,6 +38,7 @@ namespace Amalgame.Web
 import Amalgame.Collections
 import Amalgame.String
 import Amalgame.Database.NoSQL.Redis
+import Amalgame.Threading
 
 public class RedisSessionStore {
     public Host:           string
@@ -58,6 +59,15 @@ public class RedisSessionStore {
     // as a class field.
     public Handle:         AmalgameRedis
 
+    // v0.9.3: mutex serialising Redis command writes. The RESP2
+    // protocol is request/response on a single TCP stream — it's
+    // NOT multiplexable. Under Http1.ServeMt, two worker threads
+    // running ops on the same handle would interleave their command
+    // bytes and read each other's replies. The lock is around the
+    // whole Get/Set/Del/Expire/Incr op (write + read), not just the
+    // socket write, so each thread sees a clean reply.
+    public Mu:             AmalgameMutex
+
     public RedisSessionStore() {
         this.Host           = "127.0.0.1"
         this.Port           = 6379
@@ -69,6 +79,7 @@ public class RedisSessionStore {
         this.CookieMaxAge   = 0
         this.MaxAgeSec      = 86400
         this.Handle         = null
+        this.Mu             = Threading.MutexNew()
     }
 
     // ── Builders ─────────────────────────────────────
@@ -106,10 +117,15 @@ public class RedisSessionStore {
     // Connectivity probe — uses the pooled handle (open on first
     // call, leave open after). Same return-true-iff-server-answers
     // semantics as v0.8.4; the side effect is now "warm cache" not
-    // "open + close".
+    // "open + close". Mu-protected for the same RESP2 reason.
     public bool Probe() {
-        if (!this.EnsureHandle()) { return false }
-        return Redis.Ping(this.Handle)
+        Threading.MutexLock(this.Mu)
+        var ok: bool = false
+        if (this.EnsureHandle()) {
+            ok = Redis.Ping(this.Handle)
+        }
+        Threading.MutexUnlock(this.Mu)
+        return ok
     }
 
     // ── Cookie helper ────────────────────────────────
@@ -136,36 +152,50 @@ public class RedisSessionStore {
     }
 
     // Look up a session by id. Returns null if Redis is down or
-    // the key is missing.
+    // the key is missing. Wrapped in this.Mu so RESP2 commands
+    // serialise per-store under Http1.ServeMt.
     public Session Find(string id) {
-        if (!this.EnsureHandle()) { return null }
-        let key: string = this.KeyPrefix + ":" + id
-        if (!Redis.Exists(this.Handle, key)) { return null }
-        let raw: string = Redis.Get(this.Handle, key)
-        let session = new Session(id)
-        session.MaxAgeSec = this.MaxAgeSec
-        session.Data = RedisSessionStore.DeserializeData(raw)
-        return session
+        Threading.MutexLock(this.Mu)
+        var result: Session = null
+        if (this.EnsureHandle()) {
+            let key: string = this.KeyPrefix + ":" + id
+            if (Redis.Exists(this.Handle, key)) {
+                let raw: string = Redis.Get(this.Handle, key)
+                let session = new Session(id)
+                session.MaxAgeSec = this.MaxAgeSec
+                session.Data = RedisSessionStore.DeserializeData(raw)
+                result = session
+            }
+        }
+        Threading.MutexUnlock(this.Mu)
+        return result
     }
 
     // Serialise + write the session to Redis with the configured
     // TTL. Returns false on connection or write failure.
     public bool Save(Session s) {
-        if (!this.EnsureHandle()) { return false }
         let key: string = this.KeyPrefix + ":" + s.Id
         let payload: string = RedisSessionStore.SerializeData(s.Data)
-        let setOk: bool = Redis.Set(this.Handle, key, payload)
-        if (setOk && this.MaxAgeSec > 0) {
-            Redis.Expire(this.Handle, key, this.MaxAgeSec)
+        Threading.MutexLock(this.Mu)
+        var ok: bool = false
+        if (this.EnsureHandle()) {
+            ok = Redis.Set(this.Handle, key, payload)
+            if (ok && this.MaxAgeSec > 0) {
+                Redis.Expire(this.Handle, key, this.MaxAgeSec)
+            }
         }
-        return setOk
+        Threading.MutexUnlock(this.Mu)
+        return ok
     }
 
     // Remove a session. No-op if Redis is down.
     public void Destroy(string id) {
-        if (!this.EnsureHandle()) { return }
         let key: string = this.KeyPrefix + ":" + id
-        Redis.Del(this.Handle, key)
+        Threading.MutexLock(this.Mu)
+        if (this.EnsureHandle()) {
+            Redis.Del(this.Handle, key)
+        }
+        Threading.MutexUnlock(this.Mu)
     }
 
     // ── FromMap — for the [sessions] TOML table when ─
