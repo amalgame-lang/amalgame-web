@@ -26,7 +26,7 @@
 
 [package]
 name              = "amalgame-web"
-version           = "0.9.4"
+version           = "0.10.0"
 license           = "Apache-2.0"
 description       = "Mosaic — the Amalgame web framework runtime library."
 required-amalgame = ">=0.8.37"
@@ -49,6 +49,7 @@ classes   = [
     "LogConfig",
     "SignedCookieSessionStore",
     "RedisSessionStore",
+    "AcmeConfig",
 ]
 header    = "runtime/Amalgame_Web.h"
 namespace = "Amalgame.Web"
@@ -67,6 +68,7 @@ sources   = [
     "log_config.am",
     "signed_cookie_session.am",
     "redis_session.am",
+    "acme_config.am",
     "web_app.am",
 ]
 libs      = []
