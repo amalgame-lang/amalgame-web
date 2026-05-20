@@ -8,22 +8,16 @@ namespace Amalgame.Web
 
 import Amalgame.Collections
 import Amalgame.String
+import Amalgame.Threading
 
-// v0.9.0: process-wide mutex protecting MemorySessionStore.Sessions
+// v0.9.2: per-instance mutex protecting MemorySessionStore.Sessions
 // when Mosaic runs under Http1.ServeMt (multi-thread accept loop).
-// One global mutex covers every MemorySessionStore instance in the
-// process — fine in practice since a Mosaic app typically holds
-// exactly one. The lock has zero contention cost in single-thread
-// deployments (Http1.Serve), so it's always-on rather than gated
-// behind a flag — fewer ways to misconfigure.
+// Replaces the v0.9.0 process-wide static mutex — two store
+// instances no longer serialise against each other.
 //
-// Mutex declared in a top-level @c { } block so the lifetime
-// matches the process. PTHREAD_MUTEX_INITIALIZER is the canonical
-// recursive-free static init; no need to init/destroy at runtime.
-@c {
-    #include <pthread.h>
-    static pthread_mutex_t amalgame_web_session_mu = PTHREAD_MUTEX_INITIALIZER;
-}
+// The `Mu: AmalgameMutex` field is lifted by amc v0.8.37's opaque-
+// package-type-as-class-field support. Always-on; uncontended
+// pthread_mutex_lock is sub-100ns on modern Linux.
 
 // ─────────────────────────────────────────────────────────────────
 // Session — in-memory key/value store carried by a session cookie.
@@ -76,6 +70,8 @@ public class MemorySessionStore {
     public CookieSameSite: string         // "Strict" | "Lax" | "None"
     public CookiePath:     string
     public CookieMaxAge:   int             // seconds; 0 = session cookie
+    // v0.9.2: per-instance mutex (replaces v0.9.0 process-wide static).
+    public Mu:             AmalgameMutex
 
     public MemorySessionStore() {
         this.Sessions       = new Map<string, Session>()
@@ -84,6 +80,7 @@ public class MemorySessionStore {
         this.CookieSameSite = "Lax"
         this.CookiePath     = "/"
         this.CookieMaxAge   = 0
+        this.Mu             = Threading.MutexNew()
     }
 
     // ── Cookie attribute builders ─────────────────────
@@ -129,12 +126,12 @@ public class MemorySessionStore {
 
     // ── Session lifecycle ─────────────────────────────
     // Find a session by id, or null. Thread-safe under
-    // Http1.ServeMt — wrapped in the process-wide session mutex.
+    // Http1.ServeMt — wrapped in this store's per-instance mutex.
     public Session Find(string id) {
+        Threading.MutexLock(this.Mu)
         var result: Session = null
-        @c { pthread_mutex_lock(&amalgame_web_session_mu); }
         if (this.Sessions.Has(id)) { result = this.Sessions.Get(id) }
-        @c { pthread_mutex_unlock(&amalgame_web_session_mu); }
+        Threading.MutexUnlock(this.Mu)
         return result
     }
 
@@ -143,24 +140,23 @@ public class MemorySessionStore {
     // can pass predictable ids.
     public Session Create(string id) {
         let s = new Session(id)
-        @c { pthread_mutex_lock(&amalgame_web_session_mu); }
+        Threading.MutexLock(this.Mu)
         this.Sessions.Set(id, s)
-        @c { pthread_mutex_unlock(&amalgame_web_session_mu); }
+        Threading.MutexUnlock(this.Mu)
         return s
     }
 
     // Remove a session.
     public void Destroy(string id) {
-        @c { pthread_mutex_lock(&amalgame_web_session_mu); }
+        Threading.MutexLock(this.Mu)
         this.Sessions.Remove(id)
-        @c { pthread_mutex_unlock(&amalgame_web_session_mu); }
+        Threading.MutexUnlock(this.Mu)
     }
 
     public int Size() {
-        var n: int = 0
-        @c { pthread_mutex_lock(&amalgame_web_session_mu); }
-        n = this.Sessions.Size()
-        @c { pthread_mutex_unlock(&amalgame_web_session_mu); }
+        Threading.MutexLock(this.Mu)
+        let n: int = this.Sessions.Size()
+        Threading.MutexUnlock(this.Mu)
         return n
     }
 }

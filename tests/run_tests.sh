@@ -154,16 +154,44 @@ fi
 # because the package is C-only (no .am facade to --external) and
 # amc resolves `import Amalgame.Database.NoSQL.Redis` via the package
 # cache lookup.
-REDIS_FAKE_CACHE="$BUILD_DIR/redis_cache"
+# Locate amalgame-threading (used by v0.9.2 per-instance mutex in
+# MemorySessionStore + RateLimit). Same C-only fake-cache pattern.
+THREADING_DIR=""
+if [ -n "$AMALGAME_THREADING" ] && [ -d "$AMALGAME_THREADING" ]; then
+    THREADING_DIR="$AMALGAME_THREADING"
+elif [ -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-threading" ]; then
+    THREADING_DIR="$(ls -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-threading"/*/ 2>/dev/null | head -1)"
+    THREADING_DIR="${THREADING_DIR%/}"
+elif [ -d "$PKG_DIR/../amalgame-threading" ]; then
+    THREADING_DIR="$PKG_DIR/../amalgame-threading"
+fi
+if [ -z "$THREADING_DIR" ] || [ ! -f "$THREADING_DIR/amalgame.toml" ]; then
+    echo -e "${RED}error: amalgame-threading not found${NC}"
+    echo "  set AMALGAME_THREADING=<path> or run \`amc package add threading\`"
+    exit 2
+fi
+
+# Shared fake AMALGAME_PACKAGES_DIR cache for both C-only deps.
+SHARED_FAKE_CACHE="$BUILD_DIR/pkg_cache"
 REDIS_PKG_GIT="github.com/amalgame-lang/amalgame-database-nosql-redis"
 REDIS_PKG_TAG="v0.3.0"
 REDIS_FAKE_SHA="deadbeefcafebabe0000000000000000000000ab"
 REDIS_SHORT_SHA="${REDIS_FAKE_SHA:0:8}"
-REDIS_CACHE_DIR="$REDIS_FAKE_CACHE/$REDIS_PKG_GIT/${REDIS_PKG_TAG}_${REDIS_SHORT_SHA}"
+REDIS_CACHE_DIR="$SHARED_FAKE_CACHE/$REDIS_PKG_GIT/${REDIS_PKG_TAG}_${REDIS_SHORT_SHA}"
 mkdir -p "$(dirname "$REDIS_CACHE_DIR")"
 rm -rf "$REDIS_CACHE_DIR"
 ln -s "$REDIS_DIR" "$REDIS_CACHE_DIR"
-export AMALGAME_PACKAGES_DIR="$REDIS_FAKE_CACHE"
+
+THREADING_PKG_GIT="github.com/amalgame-lang/amalgame-threading"
+THREADING_PKG_TAG="v0.1.0"
+THREADING_FAKE_SHA="cafebabedeadbeef0000000000000000000000cd"
+THREADING_SHORT_SHA="${THREADING_FAKE_SHA:0:8}"
+THREADING_CACHE_DIR="$SHARED_FAKE_CACHE/$THREADING_PKG_GIT/${THREADING_PKG_TAG}_${THREADING_SHORT_SHA}"
+mkdir -p "$(dirname "$THREADING_CACHE_DIR")"
+rm -rf "$THREADING_CACHE_DIR"
+ln -s "$THREADING_DIR" "$THREADING_CACHE_DIR"
+
+export AMALGAME_PACKAGES_DIR="$SHARED_FAKE_CACHE"
 
 # Write a transient amalgame.lock in $PKG_DIR so amc's
 # PackageRegistry.Load() picks up the redis package. The
@@ -190,6 +218,12 @@ name = "amalgame-database-nosql-redis"
 git  = "$REDIS_PKG_GIT"
 tag  = "$REDIS_PKG_TAG"
 rev  = "$REDIS_FAKE_SHA"
+
+[[package]]
+name = "amalgame-threading"
+git  = "$THREADING_PKG_GIT"
+tag  = "$THREADING_PKG_TAG"
+rev  = "$THREADING_FAKE_SHA"
 EOF
 
 # Build sibling facade .o files once, then amalgame-web's own.
