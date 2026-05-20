@@ -112,7 +112,7 @@ gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"
 # (facade.am + sources from amalgame.toml). The compiler treats
 # them all as the same package; we just have to pass each one to
 # both the lib build and the test --external chain.
-WEB_SOURCES="facade.am session.am web_context.am security_headers.am cors.am rate_limit.am csrf.am"
+WEB_SOURCES="facade.am session.am web_context.am security_headers.am cors.am rate_limit.am csrf.am web_app.am"
 WEB_EXTERNAL_FLAGS=""
 for src in $WEB_SOURCES; do
     WEB_EXTERNAL_FLAGS="$WEB_EXTERNAL_FLAGS --external $src"
@@ -150,5 +150,6 @@ build_and_run security_headers_test tests/security_headers_test.am
 build_and_run cors_test             tests/cors_test.am
 build_and_run rate_limit_test       tests/rate_limit_test.am
 build_and_run csrf_test             tests/csrf_test.am
+build_and_run web_app_test          tests/web_app_test.am
 
 echo -e "\n${GREEN}All tests completed${NC}"
