@@ -7,6 +7,7 @@
 namespace Amalgame.Web
 
 import Amalgame.Collections
+import Amalgame.String
 
 // ─────────────────────────────────────────────────────────────────
 // Session — in-memory key/value store carried by a session cookie.
@@ -44,15 +45,73 @@ public class Session {
 // MemorySessionStore — thread-unsafe in-process session storage.
 // Suitable for development and tests. Production deployments should
 // use JsonFileSessionStore (v0.1.x) or RedisSessionStore (v0.7).
+//
+// v0.8.1 wires the `[sessions]` cookie attribute knobs from
+// mosaic-configuration.md: CookieName / CookieSecure /
+// CookieSameSite / CookiePath / CookieMaxAge. Use `MakeCookie(id)`
+// to get a Cookie configured with the store's attributes — drop
+// it on a response via `resp.SetCookie(c)`.
 // ─────────────────────────────────────────────────────────────────
 
 public class MemorySessionStore {
-    public Sessions: Map<string, Session>
+    public Sessions:       Map<string, Session>
+    public CookieName:     string
+    public CookieSecure:   bool
+    public CookieSameSite: string         // "Strict" | "Lax" | "None"
+    public CookiePath:     string
+    public CookieMaxAge:   int             // seconds; 0 = session cookie
 
     public MemorySessionStore() {
-        this.Sessions = new Map<string, Session>()
+        this.Sessions       = new Map<string, Session>()
+        this.CookieName     = "mosaic_session"
+        this.CookieSecure   = true
+        this.CookieSameSite = "Lax"
+        this.CookiePath     = "/"
+        this.CookieMaxAge   = 0
     }
 
+    // ── Cookie attribute builders ─────────────────────
+    public MemorySessionStore WithCookieName(string n)       { this.CookieName     = n; return this }
+    public MemorySessionStore WithCookieSecure(bool s)       { this.CookieSecure   = s; return this }
+    public MemorySessionStore WithCookieSameSite(string ss)  { this.CookieSameSite = ss; return this }
+    public MemorySessionStore WithCookiePath(string p)       { this.CookiePath     = p; return this }
+    public MemorySessionStore WithCookieMaxAge(int a)        { this.CookieMaxAge   = a; return this }
+
+    // Build a Cookie configured with this store's attributes,
+    // ready to drop on a response via `resp.SetCookie(c)`. The
+    // session value is the id (typically the random token the
+    // caller used with Create(id)).
+    public Cookie MakeCookie(string sessionId) {
+        let c = new Cookie()
+        c.Name      = this.CookieName
+        c.Value     = sessionId
+        c.Path      = this.CookiePath
+        c.Secure    = this.CookieSecure
+        c.SameSite  = this.CookieSameSite
+        c.MaxAgeSec = this.CookieMaxAge
+        c.HttpOnly  = true        // session cookies should NOT be JS-readable
+        return c
+    }
+
+    // FromMap for the [sessions] TOML table. Recognised keys:
+    //   cookie_name        string
+    //   cookie_secure      "true" | "false"
+    //   cookie_samesite    "Strict" | "Lax" | "None"
+    //   cookie_path        string
+    //   cookie_max_age     int (seconds)
+    //   max_age_sec        int — written to each Session's MaxAgeSec on Create
+    //                       (when set, overrides the default 86400)
+    public static MemorySessionStore FromMap(Map<string, string> cfg) {
+        let s = new MemorySessionStore()
+        if (cfg.Has("cookie_name"))     { s.CookieName     = cfg.Get("cookie_name") }
+        if (cfg.Has("cookie_secure"))   { s.CookieSecure   = (cfg.Get("cookie_secure") == "true") }
+        if (cfg.Has("cookie_samesite")) { s.CookieSameSite = cfg.Get("cookie_samesite") }
+        if (cfg.Has("cookie_path"))     { s.CookiePath     = cfg.Get("cookie_path") }
+        if (cfg.Has("cookie_max_age"))  { s.CookieMaxAge   = String_ToInt(cfg.Get("cookie_max_age")) }
+        return s
+    }
+
+    // ── Session lifecycle ─────────────────────────────
     // Find a session by id, or null.
     public Session Find(string id) {
         if (this.Sessions.Has(id)) { return this.Sessions.Get(id) }
