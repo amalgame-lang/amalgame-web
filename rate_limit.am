@@ -12,6 +12,16 @@ import Amalgame.String
 import Amalgame.DateTime
 import Amalgame.Database.NoSQL.Redis
 
+// v0.9.0: process-wide mutex protecting RateLimit.Store (the
+// memory backend's bucket Map) when Mosaic runs under
+// Http1.ServeMt. Separate from the session mutex so the two
+// subsystems don't serialise against each other. Same always-on
+// philosophy: zero contention cost in single-thread deployments.
+@c {
+    #include <pthread.h>
+    static pthread_mutex_t amalgame_web_ratelimit_mu = PTHREAD_MUTEX_INITIALIZER;
+}
+
 // ─────────────────────────────────────────────────────────────────
 // RateLimitBucket — per-key window state. Internal to RateLimit but
 // public so the user can inspect or pre-seed the store from tests.
@@ -152,8 +162,13 @@ public class RateLimit {
 
     // Memory backend — fixed-window per-key counter held in `Store`.
     // Monotonic clock from amalgame-datetime; immune to NTP/DST.
+    // v0.9.0: wrapped in the process-wide rate-limit mutex so the
+    // Map mutation + bucket counter update are atomic against
+    // concurrent workers under Http1.ServeMt.
     private HttpResponse CheckMemory(string key) {
         let now: int = DateTime.NowMonotonicNanos()
+        var resp: HttpResponse = null
+        @c { pthread_mutex_lock(&amalgame_web_ratelimit_mu); }
 
         var bucket: RateLimitBucket = null
         if (this.Store.Has(key)) {
@@ -172,10 +187,12 @@ public class RateLimit {
             let elapsedNanos: int = now - bucket.WindowStartNanos
             var remainingSec: int = (this.WindowNanos - elapsedNanos) / 1000000000
             if (remainingSec < 1) { remainingSec = 1 }
-            return RateLimit.Make429(remainingSec)
+            resp = RateLimit.Make429(remainingSec)
+        } else {
+            bucket.Count = bucket.Count + 1
         }
-        bucket.Count = bucket.Count + 1
-        return null
+        @c { pthread_mutex_unlock(&amalgame_web_ratelimit_mu); }
+        return resp
     }
 
     // Redis backend — fixed-window counter using INCR + EXPIRE.
