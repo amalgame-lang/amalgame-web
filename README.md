@@ -23,7 +23,10 @@ project. amalgame-web stays pure-library.
 - **WebContext** — per-request bag (path params + app state + session)
 - **SecurityHeaders** (v0.4.0) — builder + `Apply(resp)` for the
   standard browser-side hardening headers (CSP, HSTS, XFO, nosniff,
-  Referrer-Policy, Permissions-Policy, COOP, COEP)
+  Referrer-Policy, Permissions-Policy, COOP, COEP).
+  `SecurityHeaders.FromMap(...)` (v0.4.1) wires it to flat key/value
+  config (consumed by the Mosaic CLI when it flattens `mosaic.toml`'s
+  `[security.headers]` table).
 
 ## Roadmap
 
@@ -150,6 +153,27 @@ configured policy without disabling the global config.
 HSTS is the one header that no preset sets for you: pinning a
 year-long HSTS on a response served over HTTP can lock users out
 of the site. Always opt in explicitly *and only when serving HTTPS*.
+
+### Config-file driven (v0.4.1)
+
+`SecurityHeaders.FromMap(Map<string, string>)` builds an instance
+from a flat key/value map — designed for the Mosaic CLI to feed in
+the result of flattening `mosaic.toml`'s `[security.headers]` table:
+
+```toml
+[security.headers]
+preset                  = "strict_html"      # starting point
+csp                     = "default-src https:"   # override preset CSP
+hsts_max_age            = 31536000
+hsts_include_subdomains = true
+hsts_preload            = false
+```
+
+Recognised keys: `preset` (`strict_html` | `strict_api`), `csp`,
+`frame_options`, `content_type_options` (`true`/`false`),
+`referrer_policy`, `permissions_policy`, `coop`, `coep`, `hsts`
+(pre-composed) OR `hsts_max_age` + `hsts_include_subdomains` +
+`hsts_preload`. Unknown keys are ignored (forward-compat).
 
 | Builder | Default | Header it controls |
 |---|---|---|
