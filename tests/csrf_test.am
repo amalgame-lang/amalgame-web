@@ -1,0 +1,188 @@
+// Unit tests for Csrf (v0.7.0).
+//
+// Verifies:
+//   - Default safe-method bypass (GET/HEAD/OPTIONS skip Validate)
+//   - Missing cookie → 403
+//   - Missing header → 403
+//   - Mismatched cookie/header → 403
+//   - Matched cookie/header → null (allow)
+//   - Disabled preset always returns null
+//   - ExemptPath bypass
+//   - EnsureToken sets Set-Cookie on first request
+//   - EnsureToken is idempotent when cookie already present
+//   - Token is hex (64 chars for 32 bytes) and varies between calls
+//   - FromMap composition
+
+namespace Tests
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.Random
+import Amalgame.Net.Http
+import Amalgame.Web
+
+public class Program {
+    public static void Main(string[] args) {
+        Console.WriteLine("amalgame-web — Csrf tests")
+
+        // ── 1. Safe method bypass (GET) ───────────────────────────
+        let c = Csrf.Default()
+        let getReq = new HttpRequest()
+        getReq.Method = "GET"
+        let r1: HttpResponse = c.Validate(getReq)
+        if (r1 == null) {
+            Console.WriteLine("[PASS] GET bypasses Validate")
+        } else {
+            Console.WriteLine("[FAIL] GET blocked")
+        }
+
+        // ── 2. POST without cookie/header → 403 ──────────────────
+        let postReq = new HttpRequest()
+        postReq.Method = "POST"
+        let r2: HttpResponse = c.Validate(postReq)
+        if (r2 != null && r2.StatusCode == 403) {
+            Console.WriteLine("[PASS] POST without token → 403")
+        } else {
+            Console.WriteLine("[FAIL] POST blank not blocked")
+        }
+
+        // ── 3. POST with only cookie → 403 ───────────────────────
+        let postReq3 = new HttpRequest()
+        postReq3.Method = "POST"
+        postReq3.Headers.Set("cookie", "csrf_token=abc123")
+        let r3: HttpResponse = c.Validate(postReq3)
+        if (r3 != null && r3.StatusCode == 403) {
+            Console.WriteLine("[PASS] POST cookie-only → 403")
+        } else {
+            Console.WriteLine("[FAIL] POST cookie-only not blocked")
+        }
+
+        // ── 4. POST with mismatched cookie/header → 403 ──────────
+        let postReq4 = new HttpRequest()
+        postReq4.Method = "POST"
+        postReq4.Headers.Set("cookie", "csrf_token=abc123")
+        postReq4.Headers.Set("x-csrf-token", "different")
+        let r4: HttpResponse = c.Validate(postReq4)
+        if (r4 != null && r4.StatusCode == 403) {
+            Console.WriteLine("[PASS] POST mismatch → 403")
+        } else {
+            Console.WriteLine("[FAIL] POST mismatch not blocked")
+        }
+
+        // ── 5. POST with matching cookie/header → null ───────────
+        let postReq5 = new HttpRequest()
+        postReq5.Method = "POST"
+        postReq5.Headers.Set("cookie", "csrf_token=match_me")
+        postReq5.Headers.Set("x-csrf-token", "match_me")
+        let r5: HttpResponse = c.Validate(postReq5)
+        if (r5 == null) {
+            Console.WriteLine("[PASS] POST matching → allow")
+        } else {
+            Console.WriteLine("[FAIL] POST matching blocked")
+        }
+
+        // ── 6. Disabled preset never blocks ──────────────────────
+        let dis = Csrf.Disabled()
+        let postReq6 = new HttpRequest()
+        postReq6.Method = "POST"
+        // No cookie / header at all.
+        let r6: HttpResponse = dis.Validate(postReq6)
+        if (r6 == null) {
+            Console.WriteLine("[PASS] Disabled allows all methods")
+        } else {
+            Console.WriteLine("[FAIL] Disabled blocked POST")
+        }
+
+        // ── 7. ExemptPath bypass ─────────────────────────────────
+        let cexempt = Csrf.Default().ExemptPath("/api/webhooks/")
+        let webhookReq = new HttpRequest()
+        webhookReq.Method = "POST"
+        webhookReq.Path   = "/api/webhooks/github"
+        // No tokens — but path is exempt.
+        let r7: HttpResponse = cexempt.Validate(webhookReq)
+        if (r7 == null) {
+            Console.WriteLine("[PASS] exempt path bypasses")
+        } else {
+            Console.WriteLine("[FAIL] exempt path blocked")
+        }
+        // Non-exempt path on the same Csrf still blocks.
+        let nonExemptReq = new HttpRequest()
+        nonExemptReq.Method = "POST"
+        nonExemptReq.Path   = "/api/users"
+        let r7b: HttpResponse = cexempt.Validate(nonExemptReq)
+        if (r7b != null && r7b.StatusCode == 403) {
+            Console.WriteLine("[PASS] non-exempt path still 403")
+        } else {
+            Console.WriteLine("[FAIL] non-exempt path not blocked")
+        }
+
+        // ── 8. EnsureToken on first hit sets Set-Cookie ──────────
+        let c8 = Csrf.Default()
+        let req8 = new HttpRequest()
+        // No CSRF cookie present.
+        let resp8: HttpResponse = HttpResponse.New().Text("hi")
+        let token8: string = c8.EnsureToken(req8, resp8)
+        if (resp8.Headers.Has("Set-Cookie") && String_Length(token8) == 64) {
+            Console.WriteLine("[PASS] EnsureToken sets Set-Cookie + 64-char hex")
+        } else {
+            Console.WriteLine("[FAIL] EnsureToken shape: len=" + String_FromInt(String_Length(token8)) + " has-set-cookie=" + token8)
+        }
+
+        // ── 9. EnsureToken idempotent when cookie already present ──
+        let c9 = Csrf.Default()
+        let req9 = new HttpRequest()
+        req9.Headers.Set("cookie", "csrf_token=preexisting_token_xyz")
+        let resp9: HttpResponse = HttpResponse.New().Text("hi")
+        let token9: string = c9.EnsureToken(req9, resp9)
+        if (token9 == "preexisting_token_xyz" && !resp9.Headers.Has("Set-Cookie")) {
+            Console.WriteLine("[PASS] EnsureToken idempotent on existing cookie")
+        } else {
+            Console.WriteLine("[FAIL] EnsureToken not idempotent: " + token9)
+        }
+
+        // ── 10. Generated tokens differ ──────────────────────────
+        let c10 = Csrf.Default()
+        let t1: string = c10.NewToken()
+        let t2: string = c10.NewToken()
+        if (t1 != t2 && String_Length(t1) == 64 && String_Length(t2) == 64) {
+            Console.WriteLine("[PASS] NewToken returns distinct 64-char tokens")
+        } else {
+            Console.WriteLine("[FAIL] NewToken collision or wrong length")
+        }
+
+        // ── 11. FromMap composition ──────────────────────────────
+        let cfg = new Map<string, string>()
+        cfg.Set("cookie_name", "_xsrf")
+        cfg.Set("header_name", "X-XSRF-TOKEN")
+        cfg.Set("token_bytes", "16")
+        cfg.Set("cookie_secure", "false")
+        cfg.Set("exempt_paths", "/api/webhooks/, /api/public/")
+        let c11 = Csrf.FromMap(cfg)
+        if (c11.CookieName == "_xsrf"
+            && c11.HeaderName == "X-XSRF-TOKEN"
+            && c11.TokenBytes == 16
+            && !c11.CookieSecure
+            && c11.ExemptPaths.Count() == 2
+            && c11.ExemptPaths.Get(0) == "/api/webhooks/") {
+            Console.WriteLine("[PASS] FromMap composed correctly")
+        } else {
+            Console.WriteLine("[FAIL] FromMap shape: bytes=" + String_FromInt(c11.TokenBytes))
+        }
+
+        // ── 12. FromMap enabled=false → Disabled ─────────────────
+        let cfg2 = new Map<string, string>()
+        cfg2.Set("enabled", "false")
+        cfg2.Set("token_bytes", "99")           // should be ignored
+        let c12 = Csrf.FromMap(cfg2)
+        let postReq12 = new HttpRequest()
+        postReq12.Method = "POST"
+        let r12: HttpResponse = c12.Validate(postReq12)
+        if (r12 == null) {
+            Console.WriteLine("[PASS] FromMap enabled=false → Disabled behavior")
+        } else {
+            Console.WriteLine("[FAIL] FromMap enabled=false leaked validation")
+        }
+
+        Console.WriteLine("done")
+    }
+}

@@ -68,6 +68,7 @@ namespace Amalgame.Web
 import Amalgame.Collections
 import Amalgame.String
 import Amalgame.DateTime
+import Amalgame.Random
 
 // ─────────────────────────────────────────────────────────────────
 // Route — one registered route.
@@ -935,5 +936,300 @@ public class RateLimit {
         if (cfg.Has("window_sec"))   { rl.WindowNanos = String_ToInt(cfg.Get("window_sec")) * 1000000000 }
         if (cfg.Has("key_strategy")) { rl.KeyStrategy = cfg.Get("key_strategy") }
         return rl
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Csrf — Cross-Site Request Forgery guard, double-submit cookie
+// pattern (v0.7.0).
+//
+// How it works:
+//
+//   1. On any safe request, EnsureToken(req, resp) checks for the
+//      CSRF cookie. If absent, generates a 32-byte (256-bit) random
+//      token via amalgame-random's crypto-grade `Random.SystemBytes`
+//      and sets it as a `Set-Cookie` on the response. Returns the
+//      token string (hex-encoded) for template embedding.
+//
+//   2. On any state-changing request (POST/PUT/PATCH/DELETE by
+//      default), Validate(req) reads the CSRF cookie AND the value
+//      of a configured header (default `X-CSRF-Token`). They must
+//      match — if either is missing or the values differ, returns
+//      a 403 response. Otherwise returns null (request proceeds).
+//
+//   3. The browser's same-origin policy keeps cross-origin pages
+//      from reading the cookie OR setting custom request headers
+//      (without a CORS preflight that we control), so an attacker
+//      can't forge the matching header even if they trick the user
+//      into submitting a form.
+//
+// Why double-submit (not synchronizer tokens):
+//   - Stateless — no server-side token store, no Session dep.
+//   - Works for stateless APIs as well as form posts.
+//
+// Limitations:
+//   - Requires the CSRF cookie to be readable by JS (NOT HttpOnly)
+//     so the client can echo it in the custom header. Mitigated by:
+//     setting `Secure` + `SameSite=Lax` (default), keeping the
+//     cookie's only sensitive value being its randomness, and never
+//     using it as a session bearer.
+//   - For pure HTML forms (no JS), embed the token as a hidden
+//     <input name="csrf_token"> and validate against the form body
+//     instead of a header — TODO v0.7.x adds a `BodyKey` config
+//     for this; today header-only.
+//
+// Usage:
+//
+//     let csrf = Csrf.Default()
+//
+//     // in dispatch (before route handler):
+//     let forbid: HttpResponse = csrf.Validate(req)
+//     if (forbid != null) {
+//         TcpConn_Send(conn, forbid.Render())
+//         continue
+//     }
+//
+//     let resp = match.Route.Handler(ctx)
+//     csrf.EnsureToken(req, resp)           // bootstraps cookie on first hit
+//     TcpConn_Send(conn, resp.Render())
+// ─────────────────────────────────────────────────────────────────
+
+public class Csrf {
+    public CookieName:     string
+    public HeaderName:     string
+    public TokenBytes:     int           // entropy bytes (32 = 256 bits)
+    public SafeMethods:    List<string>  // bypass for these methods
+    public ExemptPaths:    List<string>  // prefix-matched bypasses
+    public CookiePath:     string
+    public CookieSecure:   bool
+    public CookieSameSite: string        // "Strict" | "Lax" | "None"
+    public CookieMaxAge:   int           // seconds; 0 = session cookie
+    // Crypto source. Use `null` to lazily call Random.FromSystem()
+    // on first need — every fresh instance creates its own stream
+    // unless reseeded.
+    public Rng:            Random
+
+    public Csrf() {
+        this.CookieName     = "csrf_token"
+        this.HeaderName     = "X-CSRF-Token"
+        this.TokenBytes     = 32
+        this.SafeMethods    = new List<string>()
+        this.SafeMethods.Add("GET")
+        this.SafeMethods.Add("HEAD")
+        this.SafeMethods.Add("OPTIONS")
+        this.ExemptPaths    = new List<string>()
+        this.CookiePath     = "/"
+        this.CookieSecure   = true
+        this.CookieSameSite = "Lax"
+        this.CookieMaxAge   = 0
+        this.Rng            = null
+    }
+
+    // Default preset — sensible production settings (256-bit token,
+    // Secure + SameSite=Lax, safe methods skipped). Pair with
+    // `.WithCookieSecure(false)` for plain HTTP dev.
+    public static Csrf Default() { return new Csrf() }
+
+    // No-op preset — Validate always returns null. Use when wiring
+    // CSRF via config so flipping `enabled=false` doesn't require
+    // tearing the pipeline down.
+    public static Csrf Disabled() {
+        let c = new Csrf()
+        c.SafeMethods = new List<string>()      // empty
+        c.SafeMethods.Add("*")                  // sentinel handled in Validate
+        return c
+    }
+
+    // ── Builders ──────────────────────────────────────
+    public Csrf WithCookieName(string n)       { this.CookieName     = n; return this }
+    public Csrf WithHeaderName(string n)       { this.HeaderName     = n; return this }
+    public Csrf WithTokenBytes(int b)          { this.TokenBytes     = b; return this }
+    public Csrf WithCookiePath(string p)       { this.CookiePath     = p; return this }
+    public Csrf WithCookieSecure(bool s)       { this.CookieSecure   = s; return this }
+    public Csrf WithCookieSameSite(string ss)  { this.CookieSameSite = ss; return this }
+    public Csrf WithCookieMaxAge(int a)        { this.CookieMaxAge   = a; return this }
+    public Csrf WithSafeMethods(List<string> m) { this.SafeMethods   = m; return this }
+    public Csrf ExemptPath(string prefix)      { this.ExemptPaths.Add(prefix); return this }
+    public Csrf WithRng(Random r)              { this.Rng            = r; return this }
+
+    // ── Token plumbing ────────────────────────────────
+    // Hex-encode a list of bytes into a 2-chars-per-byte string.
+    // Lowercase; portable (no shift/mask needed).
+    private static string HexEncode(List<int> bytes) {
+        let hex: string = "0123456789abcdef"
+        var s: string = ""
+        let n: int = bytes.Count()
+        var i: int = 0
+        while (i < n) {
+            let b: int = bytes.Get(i)
+            let hi: int = b / 16
+            let lo: int = b % 16
+            s = s + String_CharAt1(hex, hi) + String_CharAt1(hex, lo)
+            i = i + 1
+        }
+        return s
+    }
+
+    // Generate a fresh hex token using the configured Rng (lazy-
+    // initialised from the OS entropy source on first call).
+    public string NewToken() {
+        if (this.Rng == null) {
+            this.Rng = Random.FromSystem()
+        }
+        let bytes: List<int> = this.Rng.Bytes(this.TokenBytes)
+        return Csrf.HexEncode(bytes)
+    }
+
+    // ── EnsureToken — sets the CSRF cookie if missing ────────
+    // Returns the token in effect for this request (whether
+    // pre-existing from the request cookie or freshly minted).
+    // Idempotent: if the cookie is already present and non-empty,
+    // does nothing on the response.
+    public string EnsureToken(HttpRequest req, HttpResponse resp) {
+        let existing: string = this.ReadCookie(req)
+        if (existing != "") { return existing }
+        let token: string = this.NewToken()
+        let c = new Cookie()
+        c.Name     = this.CookieName
+        c.Value    = token
+        c.Path     = this.CookiePath
+        c.Secure   = this.CookieSecure
+        c.SameSite = this.CookieSameSite
+        c.MaxAgeSec = this.CookieMaxAge
+        // HttpOnly stays false — the SPA needs to read it back to
+        // echo into the X-CSRF-Token header.
+        c.HttpOnly = false
+        resp.SetCookie(c)
+        return token
+    }
+
+    // ── Validate — gate state-changing requests ──────────────
+    // Returns null when:
+    //   - Csrf is Disabled (SafeMethods contains "*")
+    //   - req.Method is in SafeMethods
+    //   - req.Path is prefix-matched by an ExemptPaths entry
+    //   - cookie value matches header value (both non-empty)
+    // Otherwise returns a 403 HttpResponse.
+    public HttpResponse Validate(HttpRequest req) {
+        // Disabled sentinel.
+        if (this.SafeMethods.Count() > 0 && this.SafeMethods.Get(0) == "*") {
+            return null
+        }
+        let m: int = this.SafeMethods.Count()
+        var i: int = 0
+        while (i < m) {
+            if (this.SafeMethods.Get(i) == req.Method) { return null }
+            i = i + 1
+        }
+        // Exempt path prefixes.
+        let pn: int = this.ExemptPaths.Count()
+        var j: int = 0
+        while (j < pn) {
+            let pref: string = this.ExemptPaths.Get(j)
+            if (String_StartsWith(req.Path, pref)) { return null }
+            j = j + 1
+        }
+        // Compare cookie ↔ header.
+        let cookieVal: string = this.ReadCookie(req)
+        let headerVal: string = req.Header(this.HeaderName)
+        if (cookieVal == "" || headerVal == "") {
+            return this.Deny("CSRF token missing")
+        }
+        if (cookieVal != headerVal) {
+            return this.Deny("CSRF token mismatch")
+        }
+        return null
+    }
+
+    // ── Internal: read the CSRF cookie out of a request ──────
+    // Cookie header is a single line "name1=value1; name2=value2".
+    // We do a small splitter rather than rely on the net-http
+    // Cookie.Parse (which has a different shape).
+    private string ReadCookie(HttpRequest req) {
+        let raw: string = req.Header("cookie")
+        if (raw == "") { return "" }
+        let n: int = String_Length(raw)
+        var start: int = 0
+        var i: int = 0
+        while (i <= n) {
+            let isEnd: bool = (i == n)
+            var sep: bool = false
+            if (!isEnd) {
+                let c: string = String_CharAt1(raw, i)
+                if (c == ";") { sep = true }
+            }
+            if (isEnd || sep) {
+                let seg: string = String_Trim(String_Substring(raw, start, i - start))
+                let segLen: int = String_Length(seg)
+                let nameLen: int = String_Length(this.CookieName)
+                if (segLen > nameLen + 1) {
+                    let prefix: string = String_Substring(seg, 0, nameLen + 1)
+                    if (prefix == this.CookieName + "=") {
+                        return String_Substring(seg, nameLen + 1, segLen - nameLen - 1)
+                    }
+                }
+                start = i + 1
+            }
+            i = i + 1
+        }
+        return ""
+    }
+
+    private HttpResponse Deny(string reason) {
+        return HttpResponse.New()
+            .Status(403)
+            .Text(reason)
+    }
+
+    // Local copy of the comma-trim splitter — Cors.SplitCsv is
+    // private to that class, and we'd rather keep Csrf self-contained
+    // than punch a hole in Cors's surface for one shared helper.
+    private static List<string> SplitCsv(string csv) {
+        let result: List<string> = new List<string>()
+        let n: int = String_Length(csv)
+        if (n == 0) { return result }
+        var start: int = 0
+        var i: int = 0
+        while (i < n) {
+            let c: string = String_CharAt1(csv, i)
+            if (c == ",") {
+                result.Add(String_Trim(String_Substring(csv, start, i - start)))
+                start = i + 1
+            }
+            i = i + 1
+        }
+        if (n > start) {
+            result.Add(String_Trim(String_Substring(csv, start, n - start)))
+        }
+        return result
+    }
+
+    // ── FromMap — TOML/env friendly ───────────────────
+    // Recognised keys (all optional, unknown ignored):
+    //   enabled         "true" | "false"  — false returns Disabled()
+    //   cookie_name     string
+    //   header_name     string
+    //   token_bytes     int (entropy bytes)
+    //   safe_methods    comma-separated
+    //   exempt_paths    comma-separated (prefix match)
+    //   cookie_path     string
+    //   cookie_secure   "true" | "false"
+    //   cookie_samesite "Strict" | "Lax" | "None"
+    //   cookie_max_age  int (seconds)
+    public static Csrf FromMap(Map<string, string> cfg) {
+        if (cfg.Has("enabled") && cfg.Get("enabled") == "false") {
+            return Csrf.Disabled()
+        }
+        var c: Csrf = new Csrf()
+        if (cfg.Has("cookie_name"))      { c.CookieName     = cfg.Get("cookie_name") }
+        if (cfg.Has("header_name"))      { c.HeaderName     = cfg.Get("header_name") }
+        if (cfg.Has("token_bytes"))      { c.TokenBytes     = String_ToInt(cfg.Get("token_bytes")) }
+        if (cfg.Has("safe_methods"))     { c.SafeMethods    = Csrf.SplitCsv(cfg.Get("safe_methods")) }
+        if (cfg.Has("exempt_paths"))     { c.ExemptPaths    = Csrf.SplitCsv(cfg.Get("exempt_paths")) }
+        if (cfg.Has("cookie_path"))      { c.CookiePath     = cfg.Get("cookie_path") }
+        if (cfg.Has("cookie_secure"))    { c.CookieSecure   = (cfg.Get("cookie_secure") == "true") }
+        if (cfg.Has("cookie_samesite"))  { c.CookieSameSite = cfg.Get("cookie_samesite") }
+        if (cfg.Has("cookie_max_age"))   { c.CookieMaxAge   = String_ToInt(cfg.Get("cookie_max_age")) }
+        return c
     }
 }

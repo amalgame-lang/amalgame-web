@@ -36,10 +36,15 @@ project. amalgame-web stays pure-library.
   null when allowed. Per-IP keying via `RemoteAddr`. Time source:
   monotonic nanoseconds via `amalgame-datetime`. Presets `PerIp` /
   `Disabled`, builders, `RateLimit.FromMap(...)`.
+- **Csrf** (v0.7.0) — double-submit cookie CSRF guard.
+  `EnsureToken(req, resp)` bootstraps the cookie (256-bit entropy
+  via `amalgame-random`), `Validate(req)` returns a 403 on mismatch
+  (or null when the method/path is exempt). Presets `Default` /
+  `Disabled`, builders for cookie attributes + safe methods +
+  exempt paths, `Csrf.FromMap(...)`.
 
 ## Roadmap
 
-- v0.6.x — Security pack continued: CSRF middleware (needs amalgame-random)
 - v0.7.x — `JsonFileSessionStore`, `RedisSessionStore`, cookie attribute config
 - v0.8.x — Reverse proxy + layout/nested-layout helpers
 
@@ -49,6 +54,7 @@ project. amalgame-web stays pure-library.
 amc package add tls          # for HTTPS later
 amc package add net-http     # HTTP parser + types
 amc package add datetime     # for RateLimit (monotonic clock)
+amc package add random       # for Csrf (crypto entropy)
 amc package add web          # this package
 ```
 
@@ -302,3 +308,56 @@ key_strategy  = "ip"                       # only one supported today
 
 When `enabled = false`, returns `RateLimit.Disabled()` regardless of
 other keys. `rps` is a shortcut for `max_requests=N, window_sec=1`.
+
+## Csrf (v0.7.0)
+
+Double-submit cookie CSRF guard. The browser's same-origin policy
+keeps cross-origin pages from reading the cookie or setting custom
+headers without our consent, so the attacker can't forge the
+matching header even if they trick the user into submitting a form.
+
+```amalgame
+let csrf = Csrf.Default()                  // 256-bit token, Secure + SameSite=Lax
+
+// in dispatch — BEFORE the handler:
+let forbid: HttpResponse = csrf.Validate(req)
+if (forbid != null) {
+    TcpConn_Send(conn, forbid.Render())   // 403
+    continue
+}
+
+let resp = match.Route.Handler(ctx)
+csrf.EnsureToken(req, resp)                // bootstraps cookie on first hit
+TcpConn_Send(conn, resp.Render())
+```
+
+- **Safe methods** (GET / HEAD / OPTIONS) bypass `Validate` by
+  default. Override with `WithSafeMethods(...)`.
+- **Exempt paths** (e.g. `/api/webhooks/*` for inbound third-party
+  callbacks that can't carry your CSRF token) bypass via
+  `ExemptPath(prefix)`. Prefix-match, applied in order.
+- **Token**: 32-byte (256-bit) hex string from `amalgame-random`'s
+  crypto-grade `Random.SystemBytes` (`/dev/urandom` /
+  `BCryptGenRandom`). `WithTokenBytes(...)` to tune.
+- **Cookie attributes**: defaults are `Secure=true`, `SameSite=Lax`,
+  `Path=/`, no `HttpOnly` (the SPA needs to read it to echo back).
+  Tweak with `WithCookieSecure(...)`, `WithCookieSameSite(...)`, etc.
+
+`Csrf.FromMap(Map<string, string>)` for the `[security.csrf]`
+TOML table:
+
+```toml
+[security.csrf]
+enabled         = true
+cookie_name     = "csrf_token"
+header_name     = "X-CSRF-Token"
+token_bytes     = 32
+cookie_secure   = true
+cookie_samesite = "Lax"
+cookie_max_age  = 0                        # 0 = session cookie
+exempt_paths    = "/api/webhooks/, /healthz"
+```
+
+Set `enabled = false` to get `Csrf.Disabled()` regardless of other
+keys — useful for tearing down validation in dev without removing
+the wiring.

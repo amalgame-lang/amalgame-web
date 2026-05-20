@@ -43,6 +43,14 @@ jobs:
           ref: v0.1.0
           path: amalgame-datetime
 
+      # v0.7.0+: Csrf uses `Random.SystemBytes()` from amalgame-random
+      # for crypto-grade CSRF token entropy. Same sibling-checkout pattern.
+      - uses: actions/checkout@v4
+        with:
+          repository: amalgame-lang/amalgame-random
+          ref: v0.1.0
+          path: amalgame-random
+
       - name: Install system deps
         run: |
           sudo apt-get update -qq
@@ -65,4 +73,5 @@ jobs:
         env:
           AMALGAME_NET_HTTP: ${{ github.workspace }}/amalgame-net-http
           AMALGAME_DATETIME: ${{ github.workspace }}/amalgame-datetime
+          AMALGAME_RANDOM:   ${{ github.workspace }}/amalgame-random
         run: ./tests/run_tests.sh "$AMC"
