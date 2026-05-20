@@ -247,7 +247,7 @@ build_and_run() {
         $WEB_EXTERNAL_FLAGS 2>&1 | tail -2
     gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$CRYPTO_DIR" -I"$REDIS_DIR/runtime" -I"$RUNTIME_DIR" \
         "$BUILD_DIR/$name.c" "$BUILD_DIR/facade.o" "$BUILD_DIR/nethttp.o" "$BUILD_DIR/datetime.o" "$BUILD_DIR/random.o" "$BUILD_DIR/logging.o" "$BUILD_DIR/crypto.o" \
-        -lgc -lm -lz -lcrypto -o "$BUILD_DIR/$name" 2>&1 | head -5
+        -lgc -lm -lz -lcrypto -lpthread -o "$BUILD_DIR/$name" 2>&1 | head -5
     [ -x "$BUILD_DIR/$name" ] || { echo -e "${RED}${name} build failed${NC}"; exit 1; }
     "$BUILD_DIR/$name"
 }
