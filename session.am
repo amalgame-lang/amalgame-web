@@ -1,0 +1,77 @@
+// amalgame-web — Session storage primitives.
+//
+// Lives in its own file since v0.7.x split (was in facade.am v0.7.0
+// and earlier). No behavior change vs the previous combined file —
+// just locality.
+
+namespace Amalgame.Web
+
+import Amalgame.Collections
+
+// ─────────────────────────────────────────────────────────────────
+// Session — in-memory key/value store carried by a session cookie.
+//
+// Values are typed as string for v0.1 (JSON-encodable). v0.1.x will
+// add typed accessors once we generalize JsonValue storage.
+// ─────────────────────────────────────────────────────────────────
+
+public class Session {
+    public Id:        string
+    public Data:      Map<string, string>
+    public CreatedAt: int                       // Unix epoch seconds
+    public TouchedAt: int                       // updated on Get/Set
+    public MaxAgeSec: int
+
+    public Session(string id) {
+        this.Id        = id
+        this.Data      = new Map<string, string>()
+        this.CreatedAt = 0
+        this.TouchedAt = 0
+        this.MaxAgeSec = 86400
+    }
+
+    public string Get(string key) {
+        if (this.Data.Has(key)) { return this.Data.Get(key) }
+        return ""
+    }
+    public void Set(string key, string value) { this.Data.Set(key, value) }
+    public void Delete(string key) { this.Data.Remove(key) }
+    public void Clear() { this.Data = new Map<string, string>() }
+    public bool Has(string key) { return this.Data.Has(key) }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// MemorySessionStore — thread-unsafe in-process session storage.
+// Suitable for development and tests. Production deployments should
+// use JsonFileSessionStore (v0.1.x) or RedisSessionStore (v0.7).
+// ─────────────────────────────────────────────────────────────────
+
+public class MemorySessionStore {
+    public Sessions: Map<string, Session>
+
+    public MemorySessionStore() {
+        this.Sessions = new Map<string, Session>()
+    }
+
+    // Find a session by id, or null.
+    public Session Find(string id) {
+        if (this.Sessions.Has(id)) { return this.Sessions.Get(id) }
+        return null
+    }
+
+    // Create + register a new session with a caller-provided id.
+    // Use Router-generated tokens (256-bit random) for prod; tests
+    // can pass predictable ids.
+    public Session Create(string id) {
+        let s = new Session(id)
+        this.Sessions.Set(id, s)
+        return s
+    }
+
+    // Remove a session.
+    public void Destroy(string id) {
+        this.Sessions.Remove(id)
+    }
+
+    public int Size() { return this.Sessions.Size() }
+}

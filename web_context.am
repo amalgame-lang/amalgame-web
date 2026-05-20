@@ -1,0 +1,40 @@
+// amalgame-web — Per-request WebContext bag.
+//
+// Lives in its own file since v0.7.x split. References `Session`
+// from session.am — load order in amalgame.toml's `sources` must
+// list session.am before this one.
+
+namespace Amalgame.Web
+
+import Amalgame.Collections
+
+// ─────────────────────────────────────────────────────────────────
+// WebContext — per-request "bag" of conveniences.
+//
+// In v0.1.x this becomes the canonical handler argument. For v0.1,
+// it's a standalone value the user can populate manually.
+// ─────────────────────────────────────────────────────────────────
+
+public class WebContext {
+    public Params:    Map<string, string>     // path params from RouteMatch
+    public State:     Map<string, string>     // app-level shared state (string-typed v0.1)
+    public Session:   Session                 // null if no session
+    public RequestId: string
+
+    public WebContext() {
+        this.Params    = new Map<string, string>()
+        this.State     = new Map<string, string>()
+        this.Session   = null
+        this.RequestId = ""
+    }
+
+    public string Param(string name) {
+        if (this.Params.Has(name)) { return this.Params.Get(name) }
+        return ""
+    }
+
+    public string StateOf(string name) {
+        if (this.State.Has(name)) { return this.State.Get(name) }
+        return ""
+    }
+}

@@ -1,0 +1,195 @@
+// amalgame-web — SecurityHeaders (response-side hardening).
+//
+// Lives in its own file since v0.7.x split. Shipped in v0.4.0 with
+// the FromMap loader added in v0.4.1. No behavior change vs the
+// previous combined facade.am — just locality.
+
+namespace Amalgame.Web
+
+import Amalgame.Collections
+import Amalgame.String
+
+// ─────────────────────────────────────────────────────────────────
+// SecurityHeaders — response-side hardening (v0.4.0).
+//
+// Builder + `Apply(resp)` that stamps the standard browser-side
+// security headers onto an HttpResponse:
+//
+//   Strict-Transport-Security    (HSTS — opt in via WithHsts)
+//   Content-Security-Policy      (CSP)
+//   X-Frame-Options              (clickjacking — superseded by CSP frame-ancestors but still respected)
+//   X-Content-Type-Options       (MIME sniffing — always "nosniff")
+//   Referrer-Policy
+//   Permissions-Policy           (formerly Feature-Policy)
+//   Cross-Origin-Opener-Policy   (COOP — needed for SharedArrayBuffer)
+//   Cross-Origin-Embedder-Policy (COEP — needed for SharedArrayBuffer)
+//
+// Defaults are *off*: an empty `SecurityHeaders()` adds no headers.
+// Use one of the presets — `SecurityHeaders.StrictHtml()` for HTML
+// pages, `SecurityHeaders.StrictApi()` for JSON APIs — or compose
+// your own with the `With...` builders.
+//
+// Apply NEVER overwrites a header the handler already set; the
+// handler wins (defense-in-depth, but predictable).
+//
+// HSTS is the one preset-omitted header: stamping a 1-year HSTS
+// on a response that's then served over HTTP can lock users out
+// of the site. Always opt in explicitly *and only when serving
+// HTTPS* via WithHsts(maxAge, includeSubdomains, preload).
+//
+// Usage:
+//
+//     let sec = SecurityHeaders.StrictHtml()
+//         .WithHsts(31536000, true, false)
+//     // ... in dispatch loop, after handler:
+//     let resp = match.Route.Handler(ctx)
+//     sec.Apply(resp)
+//     TcpConn_Send(conn, resp.Render())
+// ─────────────────────────────────────────────────────────────────
+
+public class SecurityHeaders {
+    public Hsts:                 string  // "" = don't emit; else full value, e.g. "max-age=31536000"
+    public ContentSecurityPolicy: string
+    public FrameOptions:         string  // "DENY" | "SAMEORIGIN" | ""
+    public ContentTypeOptions:   bool    // true → "X-Content-Type-Options: nosniff"
+    public ReferrerPolicy:       string
+    public PermissionsPolicy:    string
+    public Coop:                 string
+    public Coep:                 string
+
+    public SecurityHeaders() {
+        this.Hsts                  = ""
+        this.ContentSecurityPolicy = ""
+        this.FrameOptions          = ""
+        this.ContentTypeOptions    = false
+        this.ReferrerPolicy        = ""
+        this.PermissionsPolicy     = ""
+        this.Coop                  = ""
+        this.Coep                  = ""
+    }
+
+    // Strict preset for HTML responses. CSP locks scripts/styles to
+    // 'self', forbids framing entirely, denies microphone/camera/geo
+    // by default. HSTS NOT included — set it via WithHsts() once you
+    // know all subdomains can speak HTTPS.
+    public static SecurityHeaders StrictHtml() {
+        let h = new SecurityHeaders()
+        h.ContentSecurityPolicy = "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+        h.FrameOptions          = "DENY"
+        h.ContentTypeOptions    = true
+        h.ReferrerPolicy        = "strict-origin-when-cross-origin"
+        h.PermissionsPolicy     = "camera=(), microphone=(), geolocation=()"
+        return h
+    }
+
+    // Strict preset for JSON APIs — no CSP (no HTML rendered), but
+    // still nosniff + Referrer-Policy: no-referrer, FrameOptions DENY
+    // (catches browser-fetched responses).
+    public static SecurityHeaders StrictApi() {
+        let h = new SecurityHeaders()
+        h.FrameOptions       = "DENY"
+        h.ContentTypeOptions = true
+        h.ReferrerPolicy     = "no-referrer"
+        return h
+    }
+
+    // HSTS — opt-in. Pass maxAgeSec=0 to clear an existing pin (per RFC 6797).
+    public SecurityHeaders WithHsts(int maxAgeSec, bool includeSubdomains, bool preload) {
+        var v: string = "max-age=" + String_FromInt(maxAgeSec)
+        if (includeSubdomains) { v = v + "; includeSubDomains" }
+        if (preload)           { v = v + "; preload" }
+        this.Hsts = v
+        return this
+    }
+
+    public SecurityHeaders WithCsp(string policy)              { this.ContentSecurityPolicy = policy;  return this }
+    public SecurityHeaders WithoutCsp()                        { this.ContentSecurityPolicy = "";      return this }
+    public SecurityHeaders WithFrameOptions(string value)      { this.FrameOptions = value;            return this }
+    public SecurityHeaders WithContentTypeOptions(bool on)     { this.ContentTypeOptions = on;         return this }
+    public SecurityHeaders WithReferrerPolicy(string value)    { this.ReferrerPolicy = value;          return this }
+    public SecurityHeaders WithPermissionsPolicy(string value) { this.PermissionsPolicy = value;       return this }
+    public SecurityHeaders WithCoop(string value)              { this.Coop = value;                    return this }
+    public SecurityHeaders WithCoep(string value)              { this.Coep = value;                    return this }
+
+    // Build a SecurityHeaders from a flat key/value map — designed for
+    // config-file driven instantiation. The Mosaic CLI flattens its
+    // TOML `[security.headers]` table to this shape and calls FromMap.
+    // The library itself stays TOML-agnostic.
+    //
+    // Recognised keys (all optional):
+    //   preset                       "strict_html" | "strict_api"
+    //                                Starts from that preset; further
+    //                                keys then override individual
+    //                                fields. Without a preset, defaults
+    //                                are all-off.
+    //   csp                          full CSP policy string
+    //   frame_options                "DENY" | "SAMEORIGIN"
+    //   content_type_options         "true" | "false" — toggles nosniff
+    //   referrer_policy              e.g. "no-referrer"
+    //   permissions_policy           e.g. "camera=(), microphone=()"
+    //   coop                         e.g. "same-origin"
+    //   coep                         e.g. "require-corp"
+    //   hsts                         pre-composed value, OR ↓
+    //   hsts_max_age                 seconds (int as string)
+    //   hsts_include_subdomains      "true" | "false"
+    //   hsts_preload                 "true" | "false"
+    //
+    // Unknown keys are ignored (forward-compat with future fields).
+    public static SecurityHeaders FromMap(Map<string, string> cfg) {
+        var h: SecurityHeaders = new SecurityHeaders()
+        if (cfg.Has("preset")) {
+            let p: string = cfg.Get("preset")
+            if (p == "strict_html") { h = SecurityHeaders.StrictHtml() }
+            else if (p == "strict_api") { h = SecurityHeaders.StrictApi() }
+        }
+        if (cfg.Has("csp"))                  { h.ContentSecurityPolicy = cfg.Get("csp") }
+        if (cfg.Has("frame_options"))        { h.FrameOptions          = cfg.Get("frame_options") }
+        if (cfg.Has("content_type_options")) { h.ContentTypeOptions    = (cfg.Get("content_type_options") == "true") }
+        if (cfg.Has("referrer_policy"))      { h.ReferrerPolicy        = cfg.Get("referrer_policy") }
+        if (cfg.Has("permissions_policy"))   { h.PermissionsPolicy     = cfg.Get("permissions_policy") }
+        if (cfg.Has("coop"))                 { h.Coop                  = cfg.Get("coop") }
+        if (cfg.Has("coep"))                 { h.Coep                  = cfg.Get("coep") }
+        // HSTS — accept either pre-composed `hsts=...` or
+        // (`hsts_max_age` + optional flags).
+        if (cfg.Has("hsts")) {
+            h.Hsts = cfg.Get("hsts")
+        } else if (cfg.Has("hsts_max_age")) {
+            let maxAge: int = String_ToInt(cfg.Get("hsts_max_age"))
+            let inclSub: bool = cfg.Has("hsts_include_subdomains") && cfg.Get("hsts_include_subdomains") == "true"
+            let preload: bool = cfg.Has("hsts_preload") && cfg.Get("hsts_preload") == "true"
+            h.WithHsts(maxAge, inclSub, preload)
+        }
+        return h
+    }
+
+    // Stamp the configured headers onto `resp`. Skips empty fields
+    // and headers the handler already set (handler wins). Returns
+    // `resp` for chaining.
+    public HttpResponse Apply(HttpResponse resp) {
+        if (this.Hsts != "" && !resp.Headers.Has("Strict-Transport-Security")) {
+            resp.Header("Strict-Transport-Security", this.Hsts)
+        }
+        if (this.ContentSecurityPolicy != "" && !resp.Headers.Has("Content-Security-Policy")) {
+            resp.Header("Content-Security-Policy", this.ContentSecurityPolicy)
+        }
+        if (this.FrameOptions != "" && !resp.Headers.Has("X-Frame-Options")) {
+            resp.Header("X-Frame-Options", this.FrameOptions)
+        }
+        if (this.ContentTypeOptions && !resp.Headers.Has("X-Content-Type-Options")) {
+            resp.Header("X-Content-Type-Options", "nosniff")
+        }
+        if (this.ReferrerPolicy != "" && !resp.Headers.Has("Referrer-Policy")) {
+            resp.Header("Referrer-Policy", this.ReferrerPolicy)
+        }
+        if (this.PermissionsPolicy != "" && !resp.Headers.Has("Permissions-Policy")) {
+            resp.Header("Permissions-Policy", this.PermissionsPolicy)
+        }
+        if (this.Coop != "" && !resp.Headers.Has("Cross-Origin-Opener-Policy")) {
+            resp.Header("Cross-Origin-Opener-Policy", this.Coop)
+        }
+        if (this.Coep != "" && !resp.Headers.Has("Cross-Origin-Embedder-Policy")) {
+            resp.Header("Cross-Origin-Embedder-Policy", this.Coep)
+        }
+        return resp
+    }
+}
