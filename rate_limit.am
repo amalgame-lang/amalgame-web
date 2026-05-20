@@ -85,6 +85,11 @@ public class RateLimit {
     public RedisPort:      int
     public RedisKeyPrefix: string
 
+    // v0.9.1: persistent Redis connection — opened lazily on first
+    // CheckRedis call, re-used across requests. Replaces the v0.8.4
+    // open/close-per-op pattern (~50µs/op penalty → 0).
+    public RedisHandle:    AmalgameRedis
+
     public RateLimit() {
         this.MaxRequests    = 0
         this.WindowNanos    = 0
@@ -94,6 +99,7 @@ public class RateLimit {
         this.RedisHost      = "127.0.0.1"
         this.RedisPort      = 6379
         this.RedisKeyPrefix = "mosaic:rl"
+        this.RedisHandle    = null
     }
 
     // Per-IP preset. `windowSec` is the window length in seconds.
@@ -218,24 +224,34 @@ public class RateLimit {
     // a 429 hot mess — worse than ungated traffic during the
     // outage. Production should monitor Redis health separately.
     private HttpResponse CheckRedis(string key) {
-        let r = Redis.Open(this.RedisHost, this.RedisPort)
-        if (!Redis.IsOpen(r)) {
-            Redis.Close(r)
-            return null
-        }
+        if (!this.EnsureRedisHandle()) { return null }   // fail-open
         let rkey: string = this.RedisKeyPrefix + ":" + key
-        let count: int = Redis.Incr(r, rkey)
+        let count: int = Redis.Incr(this.RedisHandle, rkey)
         if (count == 1) {
             let windowSec: int = this.WindowNanos / 1000000000
-            Redis.Expire(r, rkey, windowSec)
+            Redis.Expire(this.RedisHandle, rkey, windowSec)
         }
-        Redis.Close(r)
         if (count > this.MaxRequests) {
             var remainingSec: int = this.WindowNanos / 1000000000
             if (remainingSec < 1) { remainingSec = 1 }
             return RateLimit.Make429(remainingSec)
         }
         return null
+    }
+
+    // Lazy-open the pooled Redis handle. Idempotent.
+    private bool EnsureRedisHandle() {
+        if (this.RedisHandle != null && Redis.IsOpen(this.RedisHandle)) { return true }
+        this.RedisHandle = Redis.Open(this.RedisHost, this.RedisPort)
+        return Redis.IsOpen(this.RedisHandle)
+    }
+
+    // Explicit teardown — closes the pooled Redis connection.
+    public void Disconnect() {
+        if (this.RedisHandle != null) {
+            Redis.Close(this.RedisHandle)
+            this.RedisHandle = null
+        }
     }
 
     // Shared 429 builder — kept private + static so both backends
@@ -285,15 +301,12 @@ public class RateLimit {
         return rl
     }
 
-    // Connectivity probe for the Redis backend — open + ping + close.
-    // Mirrors RedisSessionStore.Probe(). Returns false when memory
-    // backend or when Redis is unreachable.
+    // Connectivity probe for the Redis backend — uses the pooled
+    // handle (open on first call, keep open). Returns false when
+    // memory backend or when Redis is unreachable.
     public bool Probe() {
         if (this.Backend != "redis") { return false }
-        let r = Redis.Open(this.RedisHost, this.RedisPort)
-        if (!Redis.IsOpen(r)) { Redis.Close(r); return false }
-        let ok: bool = Redis.Ping(r)
-        Redis.Close(r)
-        return ok
+        if (!this.EnsureRedisHandle()) { return false }
+        return Redis.Ping(this.RedisHandle)
     }
 }

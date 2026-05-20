@@ -50,6 +50,14 @@ public class RedisSessionStore {
     public CookieMaxAge:   int
     public MaxAgeSec:      int           // TTL applied to each session
 
+    // v0.9.1: persistent connection — opened lazily on first op,
+    // re-used across calls. Closed via Disconnect() or on process
+    // exit. Lifts the v0.8.4 open/close-per-op cost (~50µs each
+    // on localhost, much worse over WAN). Requires amc v0.8.37+
+    // which can lower an opaque package type (AmalgameRedis*)
+    // as a class field.
+    public Handle:         AmalgameRedis
+
     public RedisSessionStore() {
         this.Host           = "127.0.0.1"
         this.Port           = 6379
@@ -60,6 +68,7 @@ public class RedisSessionStore {
         this.CookiePath     = "/"
         this.CookieMaxAge   = 0
         this.MaxAgeSec      = 86400
+        this.Handle         = null
     }
 
     // ── Builders ─────────────────────────────────────
@@ -73,19 +82,34 @@ public class RedisSessionStore {
     public RedisSessionStore WithCookieMaxAge(int a)         { this.CookieMaxAge   = a; return this }
     public RedisSessionStore WithMaxAgeSec(int a)            { this.MaxAgeSec      = a; return this }
 
-    // ── Connectivity probe ───────────────────────────
-    // Opens, pings, closes. Returns true if the server answered.
-    // Use this at startup to fail fast on a missing Redis, OR in
-    // tests to gate the suite when no server is up.
-    public bool Probe() {
-        let h = Redis.Open(this.Host, this.Port)
-        if (!Redis.IsOpen(h)) {
-            Redis.Close(h)
-            return false
+    // ── Connection lifecycle (v0.9.1 pooled) ─────────
+    // Lazy-open the persistent handle. Returns true on success.
+    // Idempotent — re-uses an existing live handle. Caller code
+    // doesn't have to invoke this directly; every public op calls
+    // it transparently. Manual invocation is only useful for the
+    // startup health check.
+    private bool EnsureHandle() {
+        if (this.Handle != null && Redis.IsOpen(this.Handle)) { return true }
+        this.Handle = Redis.Open(this.Host, this.Port)
+        return Redis.IsOpen(this.Handle)
+    }
+
+    // Explicit teardown — closes the pooled connection. Subsequent
+    // ops will re-open lazily.
+    public void Disconnect() {
+        if (this.Handle != null) {
+            Redis.Close(this.Handle)
+            this.Handle = null
         }
-        let ok: bool = Redis.Ping(h)
-        Redis.Close(h)
-        return ok
+    }
+
+    // Connectivity probe — uses the pooled handle (open on first
+    // call, leave open after). Same return-true-iff-server-answers
+    // semantics as v0.8.4; the side effect is now "warm cache" not
+    // "open + close".
+    public bool Probe() {
+        if (!this.EnsureHandle()) { return false }
+        return Redis.Ping(this.Handle)
     }
 
     // ── Cookie helper ────────────────────────────────
@@ -114,18 +138,10 @@ public class RedisSessionStore {
     // Look up a session by id. Returns null if Redis is down or
     // the key is missing.
     public Session Find(string id) {
-        let h = Redis.Open(this.Host, this.Port)
-        if (!Redis.IsOpen(h)) {
-            Redis.Close(h)
-            return null
-        }
+        if (!this.EnsureHandle()) { return null }
         let key: string = this.KeyPrefix + ":" + id
-        if (!Redis.Exists(h, key)) {
-            Redis.Close(h)
-            return null
-        }
-        let raw: string = Redis.Get(h, key)
-        Redis.Close(h)
+        if (!Redis.Exists(this.Handle, key)) { return null }
+        let raw: string = Redis.Get(this.Handle, key)
         let session = new Session(id)
         session.MaxAgeSec = this.MaxAgeSec
         session.Data = RedisSessionStore.DeserializeData(raw)
@@ -135,31 +151,21 @@ public class RedisSessionStore {
     // Serialise + write the session to Redis with the configured
     // TTL. Returns false on connection or write failure.
     public bool Save(Session s) {
-        let h = Redis.Open(this.Host, this.Port)
-        if (!Redis.IsOpen(h)) {
-            Redis.Close(h)
-            return false
-        }
+        if (!this.EnsureHandle()) { return false }
         let key: string = this.KeyPrefix + ":" + s.Id
         let payload: string = RedisSessionStore.SerializeData(s.Data)
-        let setOk: bool = Redis.Set(h, key, payload)
+        let setOk: bool = Redis.Set(this.Handle, key, payload)
         if (setOk && this.MaxAgeSec > 0) {
-            Redis.Expire(h, key, this.MaxAgeSec)
+            Redis.Expire(this.Handle, key, this.MaxAgeSec)
         }
-        Redis.Close(h)
         return setOk
     }
 
     // Remove a session. No-op if Redis is down.
     public void Destroy(string id) {
-        let h = Redis.Open(this.Host, this.Port)
-        if (!Redis.IsOpen(h)) {
-            Redis.Close(h)
-            return
-        }
+        if (!this.EnsureHandle()) { return }
         let key: string = this.KeyPrefix + ":" + id
-        Redis.Del(h, key)
-        Redis.Close(h)
+        Redis.Del(this.Handle, key)
     }
 
     // ── FromMap — for the [sessions] TOML table when ─
