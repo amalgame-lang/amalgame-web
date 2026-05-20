@@ -21,20 +21,16 @@ project. amalgame-web stays pure-library.
 - **Route** + **RouteMatch** primitives
 - **Session** + **MemorySessionStore** (dev / test storage)
 - **WebContext** — per-request bag (path params + app state + session)
+- **SecurityHeaders** (v0.4.0) — builder + `Apply(resp)` for the
+  standard browser-side hardening headers (CSP, HSTS, XFO, nosniff,
+  Referrer-Policy, Permissions-Policy, COOP, COEP)
 
-## v0.2 / v0.3 — runtime additions coming
+## Roadmap
 
-These are all library-side improvements; the build tool's
-filesystem routing already works against today's Router.
-
-- ACME / Let's Encrypt via amalgame-tls (server-side cert
-  provisioning)
-- Middleware (CSRF, CORS, rate limit, …) — needs the function-
-  composition API to stabilise
-- `JsonFileSessionStore`, `RedisSessionStore`
-- Reverse proxy
-- Layout / nested layout files (paired with Mosaic CLI's
-  `app/_layout.am` convention)
+- v0.4.x — Security pack: CORS, CSRF, rate-limit middlewares
+- v0.5.x — ACME / Let's Encrypt integration via amalgame-tls
+- v0.6.x — `JsonFileSessionStore`, `RedisSessionStore`
+- v0.7.x — Reverse proxy + layout/nested-layout helpers
 
 ## Install
 
@@ -130,6 +126,41 @@ store.Destroy("session_abc_123")
 
 Session ids should be 256-bit random tokens in production (use
 `amalgame-random` once available; `tests/` shows the test-id pattern).
+
+## SecurityHeaders
+
+Response-side hardening. Defaults are *off* — start from a preset
+(`StrictHtml` for HTML pages, `StrictApi` for JSON APIs) and tweak
+with the builder methods.
+
+```amalgame
+let sec = SecurityHeaders.StrictHtml()
+    .WithHsts(31536000, true, false)        // 1 year, includeSubDomains, no preload
+
+// in the accept loop, after running the handler:
+let resp: HttpResponse = match.Route.Handler(ctx)
+sec.Apply(resp)                              // stamps the configured headers
+TcpConn_Send(conn, resp.Render())
+```
+
+`Apply` never overwrites a header the handler itself set — the
+handler wins. This lets a route opt out of (or specialize) a
+configured policy without disabling the global config.
+
+HSTS is the one header that no preset sets for you: pinning a
+year-long HSTS on a response served over HTTP can lock users out
+of the site. Always opt in explicitly *and only when serving HTTPS*.
+
+| Builder | Default | Header it controls |
+|---|---|---|
+| `WithCsp(policy)` / `WithoutCsp()` | preset-dependent | `Content-Security-Policy` |
+| `WithHsts(maxAge, sub, preload)` | unset | `Strict-Transport-Security` |
+| `WithFrameOptions("DENY")` | `"DENY"` (Strict*) | `X-Frame-Options` |
+| `WithContentTypeOptions(true)` | on (Strict*) | `X-Content-Type-Options: nosniff` |
+| `WithReferrerPolicy(value)` | strict-origin-when-cross-origin (Html) / no-referrer (Api) | `Referrer-Policy` |
+| `WithPermissionsPolicy(value)` | `camera=(), microphone=(), geolocation=()` (Html) | `Permissions-Policy` |
+| `WithCoop(value)` | unset | `Cross-Origin-Opener-Policy` |
+| `WithCoep(value)` | unset | `Cross-Origin-Embedder-Policy` |
 
 ## Test
 

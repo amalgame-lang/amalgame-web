@@ -1,0 +1,135 @@
+// Unit tests for SecurityHeaders (v0.4.0).
+//
+// Verifies:
+//   - default-constructed instance stamps nothing
+//   - StrictHtml preset emits the expected headers
+//   - StrictApi preset emits the expected (smaller) set
+//   - WithHsts composes the value string correctly
+//   - Apply does not overwrite headers the handler already set
+//   - empty/disabled fields stay absent from the response
+
+namespace Tests
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.Net.Http
+import Amalgame.Web
+
+public class Program {
+    public static void Main(string[] args) {
+        Console.WriteLine("amalgame-web — SecurityHeaders tests")
+
+        // ── 1. Empty builder stamps nothing ────────────────────────
+        let empty = new SecurityHeaders()
+        let r1 = HttpResponse.New().Text("hi")
+        empty.Apply(r1)
+        let before: int = 2  // Content-Type set by Text(), Content-Length added at Render()
+        if (!r1.Headers.Has("Content-Security-Policy")
+            && !r1.Headers.Has("X-Frame-Options")
+            && !r1.Headers.Has("X-Content-Type-Options")
+            && !r1.Headers.Has("Strict-Transport-Security")) {
+            Console.WriteLine("[PASS] empty builder = no-op")
+        } else {
+            Console.WriteLine("[FAIL] empty builder leaked headers")
+        }
+
+        // ── 2. StrictHtml preset ──────────────────────────────────
+        let strict = SecurityHeaders.StrictHtml()
+        let r2 = HttpResponse.New().Html("<p>ok</p>")
+        strict.Apply(r2)
+        if (r2.Headers.Has("Content-Security-Policy")
+            && r2.Headers.Has("X-Frame-Options")
+            && r2.Headers.Has("X-Content-Type-Options")
+            && r2.Headers.Has("Referrer-Policy")
+            && r2.Headers.Has("Permissions-Policy")) {
+            Console.WriteLine("[PASS] StrictHtml emits all 5 base headers")
+        } else {
+            Console.WriteLine("[FAIL] StrictHtml missing headers")
+        }
+        if (r2.Headers.Get("X-Frame-Options") == "DENY") {
+            Console.WriteLine("[PASS] X-Frame-Options = DENY")
+        } else {
+            Console.WriteLine("[FAIL] X-Frame-Options got " + r2.Headers.Get("X-Frame-Options"))
+        }
+        if (r2.Headers.Get("X-Content-Type-Options") == "nosniff") {
+            Console.WriteLine("[PASS] X-Content-Type-Options = nosniff")
+        } else {
+            Console.WriteLine("[FAIL] X-Content-Type-Options got " + r2.Headers.Get("X-Content-Type-Options"))
+        }
+        // HSTS NOT in StrictHtml preset (opt in only)
+        if (!r2.Headers.Has("Strict-Transport-Security")) {
+            Console.WriteLine("[PASS] StrictHtml omits HSTS by default")
+        } else {
+            Console.WriteLine("[FAIL] StrictHtml leaked HSTS")
+        }
+
+        // ── 3. StrictApi preset ───────────────────────────────────
+        let api = SecurityHeaders.StrictApi()
+        let r3 = HttpResponse.New().Json("{\"ok\":true}")
+        api.Apply(r3)
+        if (!r3.Headers.Has("Content-Security-Policy")
+            && r3.Headers.Has("X-Frame-Options")
+            && r3.Headers.Has("X-Content-Type-Options")
+            && r3.Headers.Get("Referrer-Policy") == "no-referrer") {
+            Console.WriteLine("[PASS] StrictApi: nosniff+frame+ref, no CSP")
+        } else {
+            Console.WriteLine("[FAIL] StrictApi shape wrong")
+        }
+
+        // ── 4. WithHsts composes the value ────────────────────────
+        let hstsBoth = new SecurityHeaders().WithHsts(31536000, true, true)
+        let r4 = HttpResponse.New().Text("h")
+        hstsBoth.Apply(r4)
+        let v: string = r4.Headers.Get("Strict-Transport-Security")
+        if (v == "max-age=31536000; includeSubDomains; preload") {
+            Console.WriteLine("[PASS] HSTS with subdomains+preload")
+        } else {
+            Console.WriteLine("[FAIL] HSTS got: " + v)
+        }
+        let hstsBare = new SecurityHeaders().WithHsts(7776000, false, false)
+        let r5 = HttpResponse.New().Text("h")
+        hstsBare.Apply(r5)
+        let v2: string = r5.Headers.Get("Strict-Transport-Security")
+        if (v2 == "max-age=7776000") {
+            Console.WriteLine("[PASS] HSTS bare max-age")
+        } else {
+            Console.WriteLine("[FAIL] HSTS bare got: " + v2)
+        }
+
+        // ── 5. Handler-set header wins over Apply ─────────────────
+        let strict2 = SecurityHeaders.StrictHtml()
+        let r6 = HttpResponse.New()
+            .Header("Content-Security-Policy", "default-src 'none'")
+            .Text("custom")
+        strict2.Apply(r6)
+        if (r6.Headers.Get("Content-Security-Policy") == "default-src 'none'") {
+            Console.WriteLine("[PASS] handler CSP preserved (not overwritten)")
+        } else {
+            Console.WriteLine("[FAIL] Apply overwrote handler CSP")
+        }
+        // But other strict headers still applied
+        if (r6.Headers.Has("X-Frame-Options") && r6.Headers.Has("Referrer-Policy")) {
+            Console.WriteLine("[PASS] other headers still applied alongside handler-set CSP")
+        } else {
+            Console.WriteLine("[FAIL] sibling headers dropped")
+        }
+
+        // ── 6. Builder chaining + COOP/COEP ────────────────────────
+        let custom = new SecurityHeaders()
+            .WithCsp("default-src 'self' https:")
+            .WithContentTypeOptions(true)
+            .WithCoop("same-origin")
+            .WithCoep("require-corp")
+        let r7 = HttpResponse.New().Text("x")
+        custom.Apply(r7)
+        if (r7.Headers.Get("Content-Security-Policy") == "default-src 'self' https:"
+            && r7.Headers.Get("Cross-Origin-Opener-Policy") == "same-origin"
+            && r7.Headers.Get("Cross-Origin-Embedder-Policy") == "require-corp") {
+            Console.WriteLine("[PASS] chained builder + COOP/COEP")
+        } else {
+            Console.WriteLine("[FAIL] chained builder shape wrong")
+        }
+
+        Console.WriteLine("done")
+    }
+}
