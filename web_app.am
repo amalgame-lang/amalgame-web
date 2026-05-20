@@ -54,6 +54,7 @@ namespace Amalgame.Web
 import Amalgame.Collections
 import Amalgame.String
 import Amalgame.Logging
+import Amalgame.Threading
 
 public class WebApp {
     public Routes:          Router
@@ -64,6 +65,15 @@ public class WebApp {
     public Logging:         LogConfig         // null = no access log
     public State:           Map<string, string>  // app-level shared state
 
+    // v0.9.4: mutex protecting State. WithState() can legitimately be
+    // called from a handler thread at runtime (e.g. caching computed
+    // config), and Handle() reads State per-request — without the
+    // lock, concurrent .Set / .Get on the underlying AmalgameMap is
+    // a race. Routes/Headers/CorsCfg/etc. are NOT protected because
+    // they're idiomatically configured once at startup; user code that
+    // mutates them mid-run is its own problem.
+    public StateMu:         AmalgameMutex
+
     public WebApp() {
         this.Routes  = new Router()
         this.Headers = null
@@ -72,6 +82,7 @@ public class WebApp {
         this.Limiter = null
         this.Logging = null
         this.State   = new Map<string, string>()
+        this.StateMu = Threading.MutexNew()
     }
 
     public static WebApp New() { return new WebApp() }
@@ -93,7 +104,9 @@ public class WebApp {
 
     // ── Shared state (app-level k/v, exposed to handlers via ctx.State) ──
     public WebApp WithState(string key, string value) {
+        Threading.MutexLock(this.StateMu)
         this.State.Set(key, value)
+        Threading.MutexUnlock(this.StateMu)
         return this
     }
 
@@ -146,12 +159,18 @@ public class WebApp {
             let ctx = new WebContext()
             ctx.Params = m.Params
             // Shallow-copy app state into ctx for read access.
+            // Wrapped in StateMu — the lock-hold is short (a Keys()
+            // call + N Get()s for typical app-config Maps with a
+            // handful of entries). Once ctx.State is populated, the
+            // handler runs without holding the lock.
+            Threading.MutexLock(this.StateMu)
             let keys: List<string> = this.State.Keys()
             let kn: int = keys.Count()
             for i in 0..kn {
                 let k: string = keys.Get(i)
                 ctx.State.Set(k, this.State.Get(k))
             }
+            Threading.MutexUnlock(this.StateMu)
             resp = m.Route.Handler(ctx)
         }
 

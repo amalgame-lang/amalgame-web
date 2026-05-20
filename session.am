@@ -33,22 +33,54 @@ public class Session {
     public TouchedAt: int                       // updated on Get/Set
     public MaxAgeSec: int
 
+    // v0.9.4: per-Session mutex. Two requests carrying the same
+    // session cookie (common case: a user with 2 browser tabs) end
+    // up on different worker threads under Http1.ServeMt, both
+    // dereferencing the same Session instance returned by Find().
+    // Without the lock, concurrent Get/Set/Delete on Data is a
+    // race. The Mu is process-local — for distributed deployments
+    // (RedisSessionStore), Redis itself serialises with INCR/EXPIRE
+    // atomicity per-key; the Mu here covers the in-memory mutation
+    // that happens between Find() and Save().
+    public Mu:        AmalgameMutex
+
     public Session(string id) {
         this.Id        = id
         this.Data      = new Map<string, string>()
         this.CreatedAt = 0
         this.TouchedAt = 0
         this.MaxAgeSec = 86400
+        this.Mu        = Threading.MutexNew()
     }
 
     public string Get(string key) {
-        if (this.Data.Has(key)) { return this.Data.Get(key) }
-        return ""
+        Threading.MutexLock(this.Mu)
+        var result: string = ""
+        if (this.Data.Has(key)) { result = this.Data.Get(key) }
+        Threading.MutexUnlock(this.Mu)
+        return result
     }
-    public void Set(string key, string value) { this.Data.Set(key, value) }
-    public void Delete(string key) { this.Data.Remove(key) }
-    public void Clear() { this.Data = new Map<string, string>() }
-    public bool Has(string key) { return this.Data.Has(key) }
+    public void Set(string key, string value) {
+        Threading.MutexLock(this.Mu)
+        this.Data.Set(key, value)
+        Threading.MutexUnlock(this.Mu)
+    }
+    public void Delete(string key) {
+        Threading.MutexLock(this.Mu)
+        this.Data.Remove(key)
+        Threading.MutexUnlock(this.Mu)
+    }
+    public void Clear() {
+        Threading.MutexLock(this.Mu)
+        this.Data = new Map<string, string>()
+        Threading.MutexUnlock(this.Mu)
+    }
+    public bool Has(string key) {
+        Threading.MutexLock(this.Mu)
+        let r: bool = this.Data.Has(key)
+        Threading.MutexUnlock(this.Mu)
+        return r
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────
