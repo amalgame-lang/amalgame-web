@@ -515,3 +515,245 @@ public class SecurityHeaders {
         return resp
     }
 }
+
+// ─────────────────────────────────────────────────────────────────
+// Cors — Cross-Origin Resource Sharing (v0.5.0).
+//
+// Builder + two entry points:
+//
+//   cors.Preflight(req)   — if `req` is a CORS preflight (OPTIONS +
+//                           Access-Control-Request-Method), returns
+//                           a 204 response with the appropriate
+//                           Access-Control-* headers. Else returns null
+//                           and the caller proceeds to normal dispatch.
+//
+//   cors.Apply(req, resp) — for non-preflight cross-origin requests,
+//                           stamps Access-Control-Allow-Origin /
+//                           Allow-Credentials / Expose-Headers onto
+//                           the existing response. Same handler-wins
+//                           policy as SecurityHeaders.
+//
+// Vary: Origin is always added so HTTP caches don't cross-serve.
+//
+// Wildcard origin (`["*"]`) is incompatible with credentials per
+// the spec — if AllowCredentials is true, the configured allowed
+// origins MUST be explicit (the wildcard echo is suppressed).
+//
+// Defaults: every list empty → no CORS at all (a response to a
+// cross-origin request still ships, but without the headers the
+// browser needs to expose it). Use a preset (`AllowAll` / `Strict`)
+// or compose your own allowlist.
+//
+// Example:
+//
+//     let cors = Cors.Strict()
+//         .WithAllowedOrigins(["https://app.example.com"])
+//         .WithAllowCredentials(true)
+//
+//     // in dispatch:
+//     let pf: HttpResponse = cors.Preflight(req)
+//     if (pf != null) {
+//         TcpConn_Send(conn, pf.Render())
+//         continue
+//     }
+//     let resp = route.Handler(ctx)
+//     cors.Apply(req, resp)
+//     TcpConn_Send(conn, resp.Render())
+// ─────────────────────────────────────────────────────────────────
+
+public class Cors {
+    public AllowedOrigins:   List<string>      // exact origins, or ["*"]
+    public AllowedMethods:   List<string>
+    public AllowedHeaders:   List<string>
+    public ExposedHeaders:   List<string>
+    public AllowCredentials: bool
+    public MaxAgeSec:        int
+
+    public Cors() {
+        this.AllowedOrigins   = new List<string>()
+        this.AllowedMethods   = new List<string>()
+        this.AllowedHeaders   = new List<string>()
+        this.ExposedHeaders   = new List<string>()
+        this.AllowCredentials = false
+        this.MaxAgeSec        = 0
+    }
+
+    // No-op preset. An empty-origin Cors stamps nothing — useful as
+    // a base when you'll fill the lists by hand.
+    public static Cors Disabled() { return new Cors() }
+
+    // Open CORS: any origin, common methods + headers, no credentials.
+    // For dev / public APIs only.
+    public static Cors AllowAll() {
+        let c = new Cors()
+        c.AllowedOrigins.Add("*")
+        c.AllowedMethods.Add("GET")
+        c.AllowedMethods.Add("POST")
+        c.AllowedMethods.Add("PUT")
+        c.AllowedMethods.Add("PATCH")
+        c.AllowedMethods.Add("DELETE")
+        c.AllowedMethods.Add("OPTIONS")
+        c.AllowedHeaders.Add("Content-Type")
+        c.AllowedHeaders.Add("Authorization")
+        c.MaxAgeSec = 86400
+        return c
+    }
+
+    // Restrictive baseline: no origins configured (caller adds them),
+    // common safe methods + headers, no credentials, 1-day preflight
+    // cache. Pair with WithAllowedOrigins(...).
+    public static Cors Strict() {
+        let c = new Cors()
+        c.AllowedMethods.Add("GET")
+        c.AllowedMethods.Add("POST")
+        c.AllowedHeaders.Add("Content-Type")
+        c.MaxAgeSec = 86400
+        return c
+    }
+
+    // ── Builders ───────────────────────────────────────
+    public Cors WithAllowedOrigins(List<string> origins) { this.AllowedOrigins = origins;   return this }
+    public Cors WithAllowedMethods(List<string> methods) { this.AllowedMethods = methods;   return this }
+    public Cors WithAllowedHeaders(List<string> headers) { this.AllowedHeaders = headers;   return this }
+    public Cors WithExposedHeaders(List<string> headers) { this.ExposedHeaders = headers;   return this }
+    public Cors WithAllowCredentials(bool b)             { this.AllowCredentials = b;       return this }
+    public Cors WithMaxAge(int seconds)                  { this.MaxAgeSec = seconds;        return this }
+    public Cors AddOrigin(string origin)                 { this.AllowedOrigins.Add(origin); return this }
+    public Cors AddMethod(string method)                 { this.AllowedMethods.Add(method); return this }
+
+    // ── Origin matching ────────────────────────────────
+    // True if `origin` is in the allow list OR the list is wildcard.
+    public bool OriginAllowed(string origin) {
+        if (origin == "") { return false }
+        let n: int = this.AllowedOrigins.Count()
+        for i in 0..n {
+            let allowed: string = this.AllowedOrigins.Get(i)
+            if (allowed == "*") { return true }
+            if (allowed == origin) { return true }
+        }
+        return false
+    }
+
+    // What to put in Access-Control-Allow-Origin. Wildcard is forbidden
+    // when credentials are allowed; in that case we echo the specific
+    // origin (which has been validated by OriginAllowed).
+    private string OriginEcho(string origin) {
+        if (this.AllowCredentials) { return origin }
+        if (this.AllowedOrigins.Count() == 1 && this.AllowedOrigins.Get(0) == "*") {
+            return "*"
+        }
+        return origin
+    }
+
+    // ── Preflight ──────────────────────────────────────
+    // Returns a 204 response with CORS headers if `req` is a CORS
+    // preflight that matches. Returns null otherwise (caller proceeds
+    // to normal dispatch). When the origin is not allowed, returns
+    // the 204 without any Allow-* headers (browser will reject).
+    public HttpResponse Preflight(HttpRequest req) {
+        if (req.Method != "OPTIONS") { return null }
+        if (req.Header("access-control-request-method") == "") { return null }
+        let origin: string = req.Header("origin")
+        let resp: HttpResponse = HttpResponse.New().Status(204)
+        resp.Header("Vary", "Origin")
+        if (this.OriginAllowed(origin)) {
+            resp.Header("Access-Control-Allow-Origin", this.OriginEcho(origin))
+            if (this.AllowedMethods.Count() > 0) {
+                resp.Header("Access-Control-Allow-Methods", Cors.JoinList(this.AllowedMethods, ", "))
+            }
+            if (this.AllowedHeaders.Count() > 0) {
+                resp.Header("Access-Control-Allow-Headers", Cors.JoinList(this.AllowedHeaders, ", "))
+            }
+            if (this.AllowCredentials) {
+                resp.Header("Access-Control-Allow-Credentials", "true")
+            }
+            if (this.MaxAgeSec > 0) {
+                resp.Header("Access-Control-Max-Age", String_FromInt(this.MaxAgeSec))
+            }
+        }
+        return resp
+    }
+
+    // ── Normal-request decoration ──────────────────────
+    // Adds Allow-Origin / Allow-Credentials / Expose-Headers to a
+    // response. No-op if the request isn't cross-origin (no Origin
+    // header) or the origin isn't allowed. Always sets Vary: Origin
+    // when an Origin header is present so caches stay sane.
+    // Handler-set headers are never overwritten.
+    public HttpResponse Apply(HttpRequest req, HttpResponse resp) {
+        let origin: string = req.Header("origin")
+        if (origin == "") { return resp }
+        if (!resp.Headers.Has("Vary")) {
+            resp.Header("Vary", "Origin")
+        }
+        if (!this.OriginAllowed(origin)) { return resp }
+        if (!resp.Headers.Has("Access-Control-Allow-Origin")) {
+            resp.Header("Access-Control-Allow-Origin", this.OriginEcho(origin))
+        }
+        if (this.AllowCredentials && !resp.Headers.Has("Access-Control-Allow-Credentials")) {
+            resp.Header("Access-Control-Allow-Credentials", "true")
+        }
+        if (this.ExposedHeaders.Count() > 0 && !resp.Headers.Has("Access-Control-Expose-Headers")) {
+            resp.Header("Access-Control-Expose-Headers", Cors.JoinList(this.ExposedHeaders, ", "))
+        }
+        return resp
+    }
+
+    // ── FromMap — TOML/env friendly ────────────────────
+    // Recognised keys (all optional, unknown ignored):
+    //   preset             "disabled" | "allow_all" | "strict"
+    //   allowed_origins    comma-separated, trimmed
+    //   allowed_methods    comma-separated
+    //   allowed_headers    comma-separated
+    //   exposed_headers    comma-separated
+    //   allow_credentials  "true" | "false"
+    //   max_age_sec        int (string)
+    public static Cors FromMap(Map<string, string> cfg) {
+        var c: Cors = new Cors()
+        if (cfg.Has("preset")) {
+            let p: string = cfg.Get("preset")
+            if (p == "allow_all") { c = Cors.AllowAll() }
+            else if (p == "strict") { c = Cors.Strict() }
+        }
+        if (cfg.Has("allowed_origins")) { c.AllowedOrigins = Cors.SplitCsv(cfg.Get("allowed_origins")) }
+        if (cfg.Has("allowed_methods")) { c.AllowedMethods = Cors.SplitCsv(cfg.Get("allowed_methods")) }
+        if (cfg.Has("allowed_headers")) { c.AllowedHeaders = Cors.SplitCsv(cfg.Get("allowed_headers")) }
+        if (cfg.Has("exposed_headers")) { c.ExposedHeaders = Cors.SplitCsv(cfg.Get("exposed_headers")) }
+        if (cfg.Has("allow_credentials")) { c.AllowCredentials = (cfg.Get("allow_credentials") == "true") }
+        if (cfg.Has("max_age_sec")) { c.MaxAgeSec = String_ToInt(cfg.Get("max_age_sec")) }
+        return c
+    }
+
+    // ── helpers ────────────────────────────────────────
+    private static string JoinList(List<string> items, string sep) {
+        var s: string = ""
+        let n: int = items.Count()
+        for i in 0..n {
+            if (i > 0) { s = s + sep }
+            s = s + items.Get(i)
+        }
+        return s
+    }
+
+    // Splits "a, b, c" into ["a", "b", "c"], trimming each element.
+    private static List<string> SplitCsv(string csv) {
+        let result: List<string> = new List<string>()
+        let n: int = String_Length(csv)
+        if (n == 0) { return result }
+        var start: int = 0
+        var i: int = 0
+        while (i < n) {
+            let c: string = String_CharAt1(csv, i)
+            if (c == ",") {
+                let segment: string = String_Substring(csv, start, i - start)
+                result.Add(String_Trim(segment))
+                start = i + 1
+            }
+            i = i + 1
+        }
+        if (n > start) {
+            result.Add(String_Trim(String_Substring(csv, start, n - start)))
+        }
+        return result
+    }
+}

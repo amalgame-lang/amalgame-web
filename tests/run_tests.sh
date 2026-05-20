@@ -90,5 +90,6 @@ build_and_run() {
 
 build_and_run router_test           tests/router_test.am
 build_and_run security_headers_test tests/security_headers_test.am
+build_and_run cors_test             tests/cors_test.am
 
 echo -e "\n${GREEN}All tests completed${NC}"
