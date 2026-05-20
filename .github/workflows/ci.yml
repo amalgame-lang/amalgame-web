@@ -58,6 +58,13 @@ jobs:
           ref: v0.1.0
           path: amalgame-logging
 
+      # v0.8.3+: SignedCookieSessionStore uses amalgame-crypto (Hmac).
+      - uses: actions/checkout@v4
+        with:
+          repository: amalgame-lang/amalgame-crypto
+          ref: v0.1.0
+          path: amalgame-crypto
+
       - name: Install system deps
         run: |
           sudo apt-get update -qq
@@ -82,4 +89,5 @@ jobs:
           AMALGAME_DATETIME: ${{ github.workspace }}/amalgame-datetime
           AMALGAME_RANDOM:   ${{ github.workspace }}/amalgame-random
           AMALGAME_LOGGING:  ${{ github.workspace }}/amalgame-logging
+          AMALGAME_CRYPTO:   ${{ github.workspace }}/amalgame-crypto
         run: ./tests/run_tests.sh "$AMC"

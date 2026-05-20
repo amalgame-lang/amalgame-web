@@ -111,6 +111,24 @@ if [ -z "$LOGGING_DIR" ] || [ ! -f "$LOGGING_DIR/facade.am" ]; then
     exit 2
 fi
 
+# Locate amalgame-crypto (used by SignedCookieSessionStore since v0.8.3).
+# Pure-AM facade with embedded @c{} blocks for SHA-256 + HMAC core —
+# same --external chaining as amalgame-datetime / amalgame-random.
+CRYPTO_DIR=""
+if [ -n "$AMALGAME_CRYPTO" ] && [ -d "$AMALGAME_CRYPTO" ]; then
+    CRYPTO_DIR="$AMALGAME_CRYPTO"
+elif [ -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-crypto" ]; then
+    CRYPTO_DIR="$(ls -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-crypto"/*/ 2>/dev/null | head -1)"
+    CRYPTO_DIR="${CRYPTO_DIR%/}"
+elif [ -d "$PKG_DIR/../amalgame-crypto" ]; then
+    CRYPTO_DIR="$PKG_DIR/../amalgame-crypto"
+fi
+if [ -z "$CRYPTO_DIR" ] || [ ! -f "$CRYPTO_DIR/facade.am" ]; then
+    echo -e "${RED}error: amalgame-crypto not found${NC}"
+    echo "  set AMALGAME_CRYPTO=<path> or run \`amc package add crypto\`"
+    exit 2
+fi
+
 # Build sibling facade .o files once, then amalgame-web's own.
 # Order matters: net-http and datetime have no inter-dep; web
 # depends on both. --external on the web build wires the types
@@ -125,13 +143,16 @@ gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"
 gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/random.c" -o "$BUILD_DIR/random.o" 2>&1 | head -5
 [ -s "$BUILD_DIR/random.o" ] || { echo -e "${RED}random build failed${NC}"; exit 1; }
 "$AMC" --lib -o "$BUILD_DIR/logging" "$LOGGING_DIR/facade.am" 2>&1 | tail -2
-gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/logging.c" -o "$BUILD_DIR/logging.o" 2>&1 | head -5
+gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$CRYPTO_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/logging.c" -o "$BUILD_DIR/logging.o" 2>&1 | head -5
 [ -s "$BUILD_DIR/logging.o" ] || { echo -e "${RED}logging build failed${NC}"; exit 1; }
+"$AMC" --lib -o "$BUILD_DIR/crypto" "$CRYPTO_DIR/facade.am" 2>&1 | tail -2
+gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$CRYPTO_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/crypto.c" -o "$BUILD_DIR/crypto.o" 2>&1 | head -5
+[ -s "$BUILD_DIR/crypto.o" ] || { echo -e "${RED}crypto build failed${NC}"; exit 1; }
 # v0.7.x: amalgame-web is split across multiple .am files
 # (facade.am + sources from amalgame.toml). The compiler treats
 # them all as the same package; we just have to pass each one to
 # both the lib build and the test --external chain.
-WEB_SOURCES="facade.am session.am web_context.am security_headers.am cors.am rate_limit.am csrf.am log_config.am web_app.am"
+WEB_SOURCES="facade.am session.am web_context.am security_headers.am cors.am rate_limit.am csrf.am log_config.am signed_cookie_session.am web_app.am"
 WEB_EXTERNAL_FLAGS=""
 for src in $WEB_SOURCES; do
     WEB_EXTERNAL_FLAGS="$WEB_EXTERNAL_FLAGS --external $src"
@@ -141,8 +162,9 @@ done
     --external "$NETHTTP_DIR/facade.am" \
     --external "$DATETIME_DIR/facade.am" \
     --external "$RANDOM_DIR/facade.am" \
-    --external "$LOGGING_DIR/facade.am" 2>&1 | tail -2
-gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/facade.c" -o "$BUILD_DIR/facade.o" 2>&1 | head -5
+    --external "$LOGGING_DIR/facade.am" \
+    --external "$CRYPTO_DIR/facade.am" 2>&1 | tail -2
+gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$CRYPTO_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/facade.c" -o "$BUILD_DIR/facade.o" 2>&1 | head -5
 [ -s "$BUILD_DIR/facade.o" ] || { echo -e "${RED}facade build failed${NC}"; exit 1; }
 
 # Build + run one test file. --external order matters: net-http first
@@ -158,19 +180,21 @@ build_and_run() {
         --external "$DATETIME_DIR/facade.am" \
         --external "$RANDOM_DIR/facade.am" \
         --external "$LOGGING_DIR/facade.am" \
+        --external "$CRYPTO_DIR/facade.am" \
         $WEB_EXTERNAL_FLAGS 2>&1 | tail -2
-    gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$RUNTIME_DIR" \
-        "$BUILD_DIR/$name.c" "$BUILD_DIR/facade.o" "$BUILD_DIR/nethttp.o" "$BUILD_DIR/datetime.o" "$BUILD_DIR/random.o" "$BUILD_DIR/logging.o" \
+    gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$CRYPTO_DIR" -I"$RUNTIME_DIR" \
+        "$BUILD_DIR/$name.c" "$BUILD_DIR/facade.o" "$BUILD_DIR/nethttp.o" "$BUILD_DIR/datetime.o" "$BUILD_DIR/random.o" "$BUILD_DIR/logging.o" "$BUILD_DIR/crypto.o" \
         -lgc -lm -lz -o "$BUILD_DIR/$name" 2>&1 | head -5
     [ -x "$BUILD_DIR/$name" ] || { echo -e "${RED}${name} build failed${NC}"; exit 1; }
     "$BUILD_DIR/$name"
 }
 
-build_and_run router_test           tests/router_test.am
-build_and_run security_headers_test tests/security_headers_test.am
-build_and_run cors_test             tests/cors_test.am
-build_and_run rate_limit_test       tests/rate_limit_test.am
-build_and_run csrf_test             tests/csrf_test.am
-build_and_run web_app_test          tests/web_app_test.am
+build_and_run router_test                tests/router_test.am
+build_and_run security_headers_test      tests/security_headers_test.am
+build_and_run cors_test                  tests/cors_test.am
+build_and_run rate_limit_test            tests/rate_limit_test.am
+build_and_run csrf_test                  tests/csrf_test.am
+build_and_run web_app_test               tests/web_app_test.am
+build_and_run signed_cookie_session_test tests/signed_cookie_session_test.am
 
 echo -e "\n${GREEN}All tests completed${NC}"

@@ -1,0 +1,131 @@
+// Unit tests for SignedCookieSessionStore (v0.8.3).
+//
+// Verifies the encode/decode roundtrip + tamper resistance + the
+// cookie-attribute plumbing.
+
+namespace Tests
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.Net.Http
+import Amalgame.Web
+
+public class Program {
+    public static void Main(string[] args) {
+        Console.WriteLine("amalgame-web — SignedCookieSessionStore tests")
+
+        // ── 1. Roundtrip ─────────────────────────────────────────
+        let store = new SignedCookieSessionStore("test-secret-key")
+        let s1 = new Session("ignored-since-cookie-is-self")
+        s1.Set("user_id", "42")
+        s1.Set("role", "admin")
+        s1.Set("locale", "fr-FR")
+        let cookie_value: string = store.Encode(s1)
+        let s2: Session = store.Decode(cookie_value)
+        if (s2 != null
+            && s2.Get("user_id") == "42"
+            && s2.Get("role") == "admin"
+            && s2.Get("locale") == "fr-FR") {
+            Console.WriteLine("[PASS] encode/decode roundtrip")
+        } else {
+            Console.WriteLine("[FAIL] roundtrip lost data")
+        }
+
+        // ── 2. Tampering detected ────────────────────────────────
+        // Flip a char in the payload — signature should mismatch.
+        let tampered: string = "user_id=99&role=admin&locale=fr-FR." +
+                               String_Substring(cookie_value, String_Length(cookie_value) - 64, 64)
+        let bad: Session = store.Decode(tampered)
+        if (bad == null) {
+            Console.WriteLine("[PASS] tampered payload rejected")
+        } else {
+            Console.WriteLine("[FAIL] tampered payload accepted: user_id=" + bad.Get("user_id"))
+        }
+
+        // ── 3. Wrong secret rejected ─────────────────────────────
+        let other_store = new SignedCookieSessionStore("DIFFERENT-secret")
+        let bad2: Session = other_store.Decode(cookie_value)
+        if (bad2 == null) {
+            Console.WriteLine("[PASS] wrong-secret reject")
+        } else {
+            Console.WriteLine("[FAIL] wrong-secret accepted")
+        }
+
+        // ── 4. Malformed cookie values ───────────────────────────
+        let bad3: Session = store.Decode("")
+        let bad4: Session = store.Decode("no_dot_no_sig_here")
+        let bad5: Session = store.Decode(".")
+        let bad6: Session = store.Decode("k=v.shortsig")
+        if (bad3 == null && bad4 == null && bad5 == null && bad6 == null) {
+            Console.WriteLine("[PASS] malformed cookies all rejected")
+        } else {
+            Console.WriteLine("[FAIL] malformed cookie shape")
+        }
+
+        // ── 5. Determinism ───────────────────────────────────────
+        // Same data + same store → same encoded cookie. (Sessions
+        // with the same content yield the same signature — that's a
+        // design property the server can use as a session-version
+        // fingerprint for invalidation if it wants.)
+        let s3 = new Session("ignored")
+        s3.Set("user_id", "42")
+        let enc_a: string = store.Encode(s3)
+        let enc_b: string = store.Encode(s3)
+        if (enc_a == enc_b) {
+            Console.WriteLine("[PASS] encode determinism")
+        } else {
+            Console.WriteLine("[FAIL] encode non-deterministic")
+        }
+
+        // ── 6. Empty session encodes/decodes ─────────────────────
+        let empty_s = new Session("ignored")
+        let enc_empty: string = store.Encode(empty_s)
+        let dec_empty: Session = store.Decode(enc_empty)
+        if (dec_empty != null && dec_empty.Data.Size() == 0) {
+            Console.WriteLine("[PASS] empty session roundtrip")
+        } else {
+            Console.WriteLine("[FAIL] empty session lost")
+        }
+
+        // ── 7. MakeCookie carries store attrs ────────────────────
+        let store2 = new SignedCookieSessionStore("k")
+            .WithCookieName("scs")
+            .WithCookieSecure(false)
+            .WithCookieSameSite("Strict")
+            .WithCookiePath("/app")
+            .WithCookieMaxAge(7200)
+        let s7 = new Session("ignored")
+        s7.Set("x", "1")
+        let c: Cookie = store2.MakeCookie(s7)
+        if (c.Name == "scs"
+            && c.SameSite == "Strict"
+            && c.Path == "/app"
+            && c.MaxAgeSec == 7200
+            && !c.Secure
+            && c.HttpOnly) {
+            Console.WriteLine("[PASS] MakeCookie carries attrs")
+        } else {
+            Console.WriteLine("[FAIL] MakeCookie attrs: name=" + c.Name)
+        }
+
+        // ── 8. FromMap composes ──────────────────────────────────
+        let cfg: Map<string, string> = new Map<string, string>()
+        cfg.Set("secret", "from-map-key")
+        cfg.Set("cookie_name", "fm_sess")
+        cfg.Set("cookie_secure", "false")
+        cfg.Set("cookie_samesite", "None")
+        cfg.Set("cookie_max_age", "1800")
+        let store3 = SignedCookieSessionStore.FromMap(cfg)
+        if (store3.Secret == "from-map-key"
+            && store3.CookieName == "fm_sess"
+            && !store3.CookieSecure
+            && store3.CookieSameSite == "None"
+            && store3.CookieMaxAge == 1800) {
+            Console.WriteLine("[PASS] FromMap composes attrs")
+        } else {
+            Console.WriteLine("[FAIL] FromMap shape: " + store3.CookieName)
+        }
+
+        Console.WriteLine("done")
+    }
+}
