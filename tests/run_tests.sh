@@ -129,6 +129,69 @@ if [ -z "$CRYPTO_DIR" ] || [ ! -f "$CRYPTO_DIR/facade.am" ]; then
     exit 2
 fi
 
+# Locate amalgame-database-nosql-redis (used by RedisSessionStore since
+# v0.8.4). Unlike crypto/datetime/random/logging this is a C-only
+# package — no facade.am — so we wire it via the fake-cache pattern
+# (AMALGAME_PACKAGES_DIR + amalgame.lock) that the redis package's own
+# tests use. Resolution chain mirrors the others.
+REDIS_DIR=""
+if [ -n "$AMALGAME_DB_REDIS" ] && [ -d "$AMALGAME_DB_REDIS" ]; then
+    REDIS_DIR="$AMALGAME_DB_REDIS"
+elif [ -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-database-nosql-redis" ]; then
+    REDIS_DIR="$(ls -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-database-nosql-redis"/*/ 2>/dev/null | head -1)"
+    REDIS_DIR="${REDIS_DIR%/}"
+elif [ -d "$PKG_DIR/../amalgame-database-nosql-redis" ]; then
+    REDIS_DIR="$PKG_DIR/../amalgame-database-nosql-redis"
+fi
+if [ -z "$REDIS_DIR" ] || [ ! -f "$REDIS_DIR/amalgame.toml" ]; then
+    echo -e "${RED}error: amalgame-database-nosql-redis not found${NC}"
+    echo "  set AMALGAME_DB_REDIS=<path> or run \`amc package add database-nosql-redis\`"
+    exit 2
+fi
+
+# Stage a fake AMALGAME_PACKAGES_DIR cache pointing at REDIS_DIR.
+# This is the same dance the redis package's own tests use — needed
+# because the package is C-only (no .am facade to --external) and
+# amc resolves `import Amalgame.Database.NoSQL.Redis` via the package
+# cache lookup.
+REDIS_FAKE_CACHE="$BUILD_DIR/redis_cache"
+REDIS_PKG_GIT="github.com/amalgame-lang/amalgame-database-nosql-redis"
+REDIS_PKG_TAG="v0.3.0"
+REDIS_FAKE_SHA="deadbeefcafebabe0000000000000000000000ab"
+REDIS_SHORT_SHA="${REDIS_FAKE_SHA:0:8}"
+REDIS_CACHE_DIR="$REDIS_FAKE_CACHE/$REDIS_PKG_GIT/${REDIS_PKG_TAG}_${REDIS_SHORT_SHA}"
+mkdir -p "$(dirname "$REDIS_CACHE_DIR")"
+rm -rf "$REDIS_CACHE_DIR"
+ln -s "$REDIS_DIR" "$REDIS_CACHE_DIR"
+export AMALGAME_PACKAGES_DIR="$REDIS_FAKE_CACHE"
+
+# Write a transient amalgame.lock in $PKG_DIR so amc's
+# PackageRegistry.Load() picks up the redis package. The
+# package is C-only — no facade.am — so we can't wire it via
+# --external like the AM-facade siblings. Restore any
+# pre-existing lock via the EXIT trap.
+EXISTING_LOCK_BACKUP=""
+if [ -f "$PKG_DIR/amalgame.lock" ]; then
+    EXISTING_LOCK_BACKUP="$BUILD_DIR/amalgame.lock.bak"
+    cp "$PKG_DIR/amalgame.lock" "$EXISTING_LOCK_BACKUP"
+fi
+trap '
+    rm -rf "$BUILD_DIR"
+    if [ -n "$EXISTING_LOCK_BACKUP" ] && [ -f "$EXISTING_LOCK_BACKUP" ]; then
+        mv "$EXISTING_LOCK_BACKUP" "$PKG_DIR/amalgame.lock"
+    else
+        rm -f "$PKG_DIR/amalgame.lock"
+    fi
+' EXIT
+
+cat > "$PKG_DIR/amalgame.lock" <<EOF
+[[package]]
+name = "amalgame-database-nosql-redis"
+git  = "$REDIS_PKG_GIT"
+tag  = "$REDIS_PKG_TAG"
+rev  = "$REDIS_FAKE_SHA"
+EOF
+
 # Build sibling facade .o files once, then amalgame-web's own.
 # Order matters: net-http and datetime have no inter-dep; web
 # depends on both. --external on the web build wires the types
@@ -152,7 +215,7 @@ gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"
 # (facade.am + sources from amalgame.toml). The compiler treats
 # them all as the same package; we just have to pass each one to
 # both the lib build and the test --external chain.
-WEB_SOURCES="facade.am session.am web_context.am security_headers.am cors.am rate_limit.am csrf.am log_config.am signed_cookie_session.am web_app.am"
+WEB_SOURCES="facade.am session.am web_context.am security_headers.am cors.am rate_limit.am csrf.am log_config.am signed_cookie_session.am redis_session.am web_app.am"
 WEB_EXTERNAL_FLAGS=""
 for src in $WEB_SOURCES; do
     WEB_EXTERNAL_FLAGS="$WEB_EXTERNAL_FLAGS --external $src"
@@ -164,7 +227,7 @@ done
     --external "$RANDOM_DIR/facade.am" \
     --external "$LOGGING_DIR/facade.am" \
     --external "$CRYPTO_DIR/facade.am" 2>&1 | tail -2
-gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$CRYPTO_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/facade.c" -o "$BUILD_DIR/facade.o" 2>&1 | head -5
+gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$CRYPTO_DIR" -I"$REDIS_DIR/runtime" -I"$RUNTIME_DIR" -c "$BUILD_DIR/facade.c" -o "$BUILD_DIR/facade.o" 2>&1 | head -5
 [ -s "$BUILD_DIR/facade.o" ] || { echo -e "${RED}facade build failed${NC}"; exit 1; }
 
 # Build + run one test file. --external order matters: net-http first
@@ -182,7 +245,7 @@ build_and_run() {
         --external "$LOGGING_DIR/facade.am" \
         --external "$CRYPTO_DIR/facade.am" \
         $WEB_EXTERNAL_FLAGS 2>&1 | tail -2
-    gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$CRYPTO_DIR" -I"$RUNTIME_DIR" \
+    gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$CRYPTO_DIR" -I"$REDIS_DIR/runtime" -I"$RUNTIME_DIR" \
         "$BUILD_DIR/$name.c" "$BUILD_DIR/facade.o" "$BUILD_DIR/nethttp.o" "$BUILD_DIR/datetime.o" "$BUILD_DIR/random.o" "$BUILD_DIR/logging.o" "$BUILD_DIR/crypto.o" \
         -lgc -lm -lz -o "$BUILD_DIR/$name" 2>&1 | head -5
     [ -x "$BUILD_DIR/$name" ] || { echo -e "${RED}${name} build failed${NC}"; exit 1; }
@@ -196,5 +259,6 @@ build_and_run rate_limit_test            tests/rate_limit_test.am
 build_and_run csrf_test                  tests/csrf_test.am
 build_and_run web_app_test               tests/web_app_test.am
 build_and_run signed_cookie_session_test tests/signed_cookie_session_test.am
+build_and_run redis_session_test         tests/redis_session_test.am
 
 echo -e "\n${GREEN}All tests completed${NC}"

@@ -1,0 +1,146 @@
+// Unit tests for RedisSessionStore (v0.8.4).
+//
+// Requires a Redis-compatible server on 127.0.0.1:6379. The test
+// runner probes reachability and skips the suite if no server is
+// up — so this fixture assumes it CAN connect (called via the test
+// runner, not standalone). If the connection fails at runtime,
+// emits [SKIP] for cases that need a live server rather than [FAIL].
+//
+// Keys are namespaced under `amctest:mosaic:session:` so concurrent
+// runs against the same Redis don't collide and a cleanup pass at
+// the end DELs everything we wrote.
+
+namespace Tests
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.Net.Http
+import Amalgame.Web
+import Amalgame.Database.NoSQL.Redis
+
+public class Program {
+    public static void Main(string[] args) {
+        Console.WriteLine("amalgame-web — RedisSessionStore tests")
+
+        // Use a test-only prefix so we never touch real session data.
+        let store = new RedisSessionStore()
+        store.KeyPrefix = "amctest:mosaic:session"
+        store.MaxAgeSec = 60
+
+        if (!store.Probe()) {
+            Console.WriteLine("[SKIP] no Redis on 127.0.0.1:6379 — set redis up locally to run these")
+            return
+        }
+        Console.WriteLine("[PASS] probed Redis")
+
+        // ── 1. Create + Find roundtrip ───────────────────────────
+        let s1: Session = store.Create("sid-test-001")
+        s1.Set("user_id", "42")
+        s1.Set("role", "admin")
+        s1.Set("locale", "fr-FR")
+        store.Save(s1)
+
+        let s2: Session = store.Find("sid-test-001")
+        if (s2 != null
+            && s2.Get("user_id") == "42"
+            && s2.Get("role") == "admin"
+            && s2.Get("locale") == "fr-FR") {
+            Console.WriteLine("[PASS] create/save/find roundtrip")
+        } else {
+            Console.WriteLine("[FAIL] roundtrip lost data")
+        }
+
+        // ── 2. Missing session returns null ──────────────────────
+        let miss: Session = store.Find("sid-does-not-exist-xyz")
+        if (miss == null) {
+            Console.WriteLine("[PASS] missing session = null")
+        } else {
+            Console.WriteLine("[FAIL] missing session not null")
+        }
+
+        // ── 3. Destroy removes the key ───────────────────────────
+        store.Destroy("sid-test-001")
+        let gone: Session = store.Find("sid-test-001")
+        if (gone == null) {
+            Console.WriteLine("[PASS] destroy removes session")
+        } else {
+            Console.WriteLine("[FAIL] session still present after destroy")
+        }
+
+        // ── 4. Save survives across new Find ─────────────────────
+        // Save a session, mutate Data locally, Save again, and
+        // confirm a fresh Find sees the updated value.
+        let s3: Session = store.Create("sid-test-002")
+        s3.Set("counter", "1")
+        store.Save(s3)
+        s3.Set("counter", "2")
+        store.Save(s3)
+        let s3b: Session = store.Find("sid-test-002")
+        if (s3b != null && s3b.Get("counter") == "2") {
+            Console.WriteLine("[PASS] save overwrites previous value")
+        } else {
+            Console.WriteLine("[FAIL] update not persisted")
+        }
+        store.Destroy("sid-test-002")
+
+        // ── 5. Empty session roundtrip ───────────────────────────
+        // A session with no data should still be retrievable.
+        let s4: Session = store.Create("sid-test-003")
+        // No Set() calls — Data is empty.
+        let s4b: Session = store.Find("sid-test-003")
+        if (s4b != null && s4b.Data.Size() == 0) {
+            Console.WriteLine("[PASS] empty session roundtrip")
+        } else {
+            Console.WriteLine("[FAIL] empty session lost or polluted")
+        }
+        store.Destroy("sid-test-003")
+
+        // ── 6. MakeCookie carries attrs ──────────────────────────
+        let cs = new RedisSessionStore()
+        cs.CookieName     = "redsess"
+        cs.CookieSecure   = false
+        cs.CookieSameSite = "Strict"
+        cs.CookiePath     = "/api"
+        cs.CookieMaxAge   = 1800
+        let cookie: Cookie = cs.MakeCookie("sid-xyz")
+        if (cookie.Name == "redsess"
+            && cookie.Value == "sid-xyz"
+            && cookie.Secure == false
+            && cookie.SameSite == "Strict"
+            && cookie.Path == "/api"
+            && cookie.MaxAgeSec == 1800
+            && cookie.HttpOnly == true) {
+            Console.WriteLine("[PASS] MakeCookie carries store attrs")
+        } else {
+            Console.WriteLine("[FAIL] MakeCookie attrs wrong")
+        }
+
+        // ── 7. FromMap composes attrs ────────────────────────────
+        let cfg = new Map<string, string>()
+        cfg.Set("host", "127.0.0.1")
+        cfg.Set("port", "6379")
+        cfg.Set("key_prefix", "myapp:sess")
+        cfg.Set("max_age_sec", "7200")
+        cfg.Set("cookie_name", "app_sess")
+        cfg.Set("cookie_secure", "true")
+        cfg.Set("cookie_samesite", "Lax")
+        cfg.Set("cookie_path", "/")
+        cfg.Set("cookie_max_age", "3600")
+        let fm: RedisSessionStore = RedisSessionStore.FromMap(cfg)
+        if (fm.Host == "127.0.0.1"
+            && fm.Port == 6379
+            && fm.KeyPrefix == "myapp:sess"
+            && fm.MaxAgeSec == 7200
+            && fm.CookieName == "app_sess"
+            && fm.CookieSecure == true
+            && fm.CookieSameSite == "Lax"
+            && fm.CookiePath == "/"
+            && fm.CookieMaxAge == 3600) {
+            Console.WriteLine("[PASS] FromMap composes attrs")
+        } else {
+            Console.WriteLine("[FAIL] FromMap attrs wrong")
+        }
+
+        Console.WriteLine("done")
+    }
+}
