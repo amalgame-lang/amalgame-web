@@ -26,11 +26,23 @@
 
 [package]
 name              = "amalgame-web"
-version           = "0.11.2"
+version           = "0.11.3"
 license           = "Apache-2.0"
 description       = "Mosaic — the Amalgame web framework runtime library."
-required-amalgame = ">=0.8.38"
+required-amalgame = ">=0.8.39"
 schema-version    = 1
+
+# Runtime deps on other Amalgame packages. amc >= 0.8.39 auto-pulls
+# these recursively on `amc package add web`.
+[dependencies]
+amalgame-tls                    = ">=0.3.1"
+amalgame-net-http               = ">=0.7.1"
+amalgame-crypto                 = ">=0.3.0"
+amalgame-datetime               = ">=0.1.0"
+amalgame-random                 = ">=0.1.0"
+amalgame-logging                = ">=0.1.0"
+amalgame-database-nosql-redis   = ">=0.3.0"
+amalgame-threading              = ">=0.1.0"
 
 [stdlib]
 classes   = [
