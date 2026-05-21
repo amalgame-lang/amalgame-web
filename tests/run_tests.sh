@@ -256,19 +256,19 @@ EOF
 # net-http (v0.4.5 and earlier) had everything in facade.am; since
 # v0.4.6 the user (or test runner) has to enumerate.
 NETHTTP_SOURCES="$NETHTTP_DIR/facade.am $NETHTTP_DIR/cookie.am $NETHTTP_DIR/http_request.am $NETHTTP_DIR/http_response.am $NETHTTP_DIR/http_parser.am $NETHTTP_DIR/http_server.am $NETHTTP_DIR/http_client.am"
-"$AMC" --lib -o "$BUILD_DIR/nethttp" $NETHTTP_SOURCES 2>&1 | tail -2
+"$AMC" --lib -o "$BUILD_DIR/nethttp" $NETHTTP_SOURCES 2>&1 | tail -30
 gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/nethttp.c" -o "$BUILD_DIR/nethttp.o" 2>&1 | head -5
 [ -s "$BUILD_DIR/nethttp.o" ] || { echo -e "${RED}nethttp build failed${NC}"; exit 1; }
-"$AMC" --lib -o "$BUILD_DIR/datetime" "$DATETIME_DIR/facade.am" 2>&1 | tail -2
+"$AMC" --lib -o "$BUILD_DIR/datetime" "$DATETIME_DIR/facade.am" 2>&1 | tail -30
 gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/datetime.c" -o "$BUILD_DIR/datetime.o" 2>&1 | head -5
 [ -s "$BUILD_DIR/datetime.o" ] || { echo -e "${RED}datetime build failed${NC}"; exit 1; }
-"$AMC" --lib -o "$BUILD_DIR/random" "$RANDOM_DIR/facade.am" 2>&1 | tail -2
+"$AMC" --lib -o "$BUILD_DIR/random" "$RANDOM_DIR/facade.am" 2>&1 | tail -30
 gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/random.c" -o "$BUILD_DIR/random.o" 2>&1 | head -5
 [ -s "$BUILD_DIR/random.o" ] || { echo -e "${RED}random build failed${NC}"; exit 1; }
-"$AMC" --lib -o "$BUILD_DIR/logging" "$LOGGING_DIR/facade.am" 2>&1 | tail -2
+"$AMC" --lib -o "$BUILD_DIR/logging" "$LOGGING_DIR/facade.am" 2>&1 | tail -30
 gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$CRYPTO_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/logging.c" -o "$BUILD_DIR/logging.o" 2>&1 | head -5
 [ -s "$BUILD_DIR/logging.o" ] || { echo -e "${RED}logging build failed${NC}"; exit 1; }
-"$AMC" --lib -o "$BUILD_DIR/crypto" "$CRYPTO_DIR/facade.am" 2>&1 | tail -2
+"$AMC" --lib -o "$BUILD_DIR/crypto" "$CRYPTO_DIR/facade.am" 2>&1 | tail -30
 gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$CRYPTO_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/crypto.c" -o "$BUILD_DIR/crypto.o" 2>&1 | head -5
 [ -s "$BUILD_DIR/crypto.o" ] || { echo -e "${RED}crypto build failed${NC}"; exit 1; }
 # v0.7.x: amalgame-web is split across multiple .am files
@@ -294,7 +294,7 @@ NETHTTP_EXTERNAL_FLAGS="--external $NETHTTP_DIR/facade.am --external $NETHTTP_DI
     --external "$DATETIME_DIR/facade.am" \
     --external "$RANDOM_DIR/facade.am" \
     --external "$LOGGING_DIR/facade.am" \
-    --external "$CRYPTO_DIR/facade.am" 2>&1 | tail -2
+    --external "$CRYPTO_DIR/facade.am" 2>&1 | tail -30
 gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$CRYPTO_DIR" -I"$REDIS_DIR/runtime" -I"$RUNTIME_DIR" -c "$BUILD_DIR/facade.c" -o "$BUILD_DIR/facade.o" 2>&1 | head -5
 [ -s "$BUILD_DIR/facade.o" ] || { echo -e "${RED}facade build failed${NC}"; exit 1; }
 
@@ -312,7 +312,7 @@ build_and_run() {
         --external "$RANDOM_DIR/facade.am" \
         --external "$LOGGING_DIR/facade.am" \
         --external "$CRYPTO_DIR/facade.am" \
-        $WEB_EXTERNAL_FLAGS 2>&1 | tail -2
+        $WEB_EXTERNAL_FLAGS 2>&1 | tail -30
     gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$CRYPTO_DIR" -I"$REDIS_DIR/runtime" -I"$RUNTIME_DIR" \
         "$BUILD_DIR/$name.c" "$BUILD_DIR/facade.o" "$BUILD_DIR/nethttp.o" "$BUILD_DIR/datetime.o" "$BUILD_DIR/random.o" "$BUILD_DIR/logging.o" "$BUILD_DIR/crypto.o" \
         -lgc -lm -lz -lcrypto -lpthread -o "$BUILD_DIR/$name" 2>&1 | head -5
