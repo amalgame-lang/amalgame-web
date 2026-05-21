@@ -123,6 +123,73 @@ public class Program {
             Console.WriteLine("[FAIL] FromMap enabled flag")
         }
 
+        // ── 10. v0.11.1 — single-domain DomainsCsv() ─────────────
+        let s1 = new AcmeConfig().WithDomain("x.com")
+        if (s1.DomainsCsv() == "x.com" && s1.Domain == "x.com") {
+            Console.WriteLine("[PASS] single-domain DomainsCsv")
+        } else {
+            Console.WriteLine("[FAIL] single-domain DomainsCsv: " + s1.DomainsCsv())
+        }
+
+        // ── 11. v0.11.1 — WithDomains multi-SAN ──────────────────
+        let ds = new List<string>()
+        ds.Add("api.example.com")
+        ds.Add("www.example.com")
+        ds.Add("example.com")
+        let mm = new AcmeConfig().WithDomains(ds)
+        if (mm.Domain == "api.example.com"
+            && mm.Domains.Count() == 3
+            && mm.DomainsCsv() == "api.example.com,www.example.com,example.com"
+            && mm.CertPath() == "./certs/api.example.com/fullchain.pem") {
+            Console.WriteLine("[PASS] WithDomains multi-SAN")
+        } else {
+            Console.WriteLine("[FAIL] WithDomains multi-SAN: " + mm.DomainsCsv())
+        }
+
+        // ── 12. v0.11.1 — FromMap domains CSV ────────────────────
+        let cfgM = new Map<string, string>()
+        cfgM.Set("enabled", "true")
+        cfgM.Set("domains", "a.com, b.com , ,c.com")
+        cfgM.Set("email", "o@x.com")
+        let mc = AcmeConfig.FromMap(cfgM)
+        if (mc.Domains.Count() == 3
+            && mc.Domain == "a.com"
+            && mc.DomainsCsv() == "a.com,b.com,c.com") {
+            Console.WriteLine("[PASS] FromMap domains CSV")
+        } else {
+            Console.WriteLine("[FAIL] FromMap domains: count=" +
+                String_FromInt(mc.Domains.Count()) +
+                " first=" + mc.Domain +
+                " csv=" + mc.DomainsCsv())
+        }
+
+        // ── 13. v0.11.1 — `domains` wins over `domain` ──────────
+        let cfgBoth = new Map<string, string>()
+        cfgBoth.Set("domain", "single.example.com")
+        cfgBoth.Set("domains", "multi.example.com,other.example.com")
+        let mb = AcmeConfig.FromMap(cfgBoth)
+        if (mb.Domain == "multi.example.com"
+            && mb.Domains.Count() == 2) {
+            Console.WriteLine("[PASS] domains overrides domain")
+        } else {
+            Console.WriteLine("[FAIL] domains override: domain=" + mb.Domain)
+        }
+
+        // ── 14. v0.11.1 — SplitCsv edge cases ────────────────────
+        let empty1 = AcmeConfig.SplitCsv("")
+        let empty2 = AcmeConfig.SplitCsv(" , , ,, ")
+        let one = AcmeConfig.SplitCsv("solo.example.com")
+        if (empty1.Count() == 0
+            && empty2.Count() == 0
+            && one.Count() == 1
+            && one.Get(0) == "solo.example.com") {
+            Console.WriteLine("[PASS] SplitCsv edge cases")
+        } else {
+            Console.WriteLine("[FAIL] SplitCsv: e1=" + String_FromInt(empty1.Count()) +
+                " e2=" + String_FromInt(empty2.Count()) +
+                " one=" + String_FromInt(one.Count()))
+        }
+
         Console.WriteLine("done")
     }
 }

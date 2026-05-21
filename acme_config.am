@@ -1,4 +1,4 @@
-// amalgame-web — AcmeConfig (v0.10.0).
+// amalgame-web — AcmeConfig (v0.10.0, multi-SAN added v0.11.1).
 //
 // Configuration helper for ACME (Let's Encrypt) cert provisioning
 // via the amalgame-tls v0.2+ Acme.EnsureCert family. Mosaic owns
@@ -6,7 +6,7 @@
 // call lives in user code so it can sequence with its own startup
 // (DB connection, migrations, etc.) before binding port 443.
 //
-// User pattern (`amc package add tls + net-http`):
+// User pattern (single domain) — `amc package add tls + net-http`:
 //
 //   import Amalgame.Web
 //   import Amalgame.Tls
@@ -16,8 +16,8 @@
 //       public static void Main(string[] args) {
 //           let acme = AcmeConfig.FromTomlOrDefault("mosaic.toml")
 //           if (acme.Enabled) {
-//               let rc: int = Acme.EnsureCertEx(
-//                   acme.Domain, acme.Email, acme.CertDir,
+//               let rc: int = Acme.EnsureCertMulti(
+//                   acme.DomainsCsv(), acme.Email, acme.CertDir,
 //                   acme.AcmeServer, acme.CertbotPath)
 //               if (rc != 0) {
 //                   Console.WriteError("ACME provisioning failed: " +
@@ -35,24 +35,34 @@
 //       }
 //   }
 //
+// EnsureCertMulti handles the single-domain case too (it's the
+// canonical entry point since amalgame-tls v0.2.3) — DomainsCsv()
+// emits either "a.com" or "a.com,b.com,c.com".
+//
 // The TOML section read by `FromMap` (which `FromTomlOrDefault`
 // composes via Toml.Parse on the project root file):
 //
 //   [tls.acme]
 //   enabled       = true
-//   domain        = "example.com"
+//   domain        = "example.com"      # single-domain (legacy)
+//   # — or — multi-SAN (since v0.11.1):
+//   domains       = "example.com, www.example.com, api.example.com"
 //   email         = "ops@example.com"
 //   cert_dir      = "./certs"          # default
 //   acme_server   = ""                 # empty = LE production
 //                                       # ex: "https://acme-staging-v02.api.letsencrypt.org/directory"
 //   certbot_path  = ""                 # empty = look up "certbot" in $PATH
 //
+// When both `domain` and `domains` are set, `domains` wins. The
+// first entry of `domains` becomes the cert-name, so CertPath()
+// resolves against `<cert_dir>/<domains[0]>/fullchain.pem`.
+//
 // Env overrides applied by amalgame-tls itself (see Acme.h):
 //   MOSAIC_TLS_ACME_SERVER, MOSAIC_TLS_CERTBOT_PATH
 //
 // v0.2.x of amalgame-tls wraps certbot --standalone. v0.3 will
 // ship a native pure-AM ACME (RFC 8555) — same AcmeConfig API,
-// same TOML schema; only the call site changes (from EnsureCertEx
+// same TOML schema; only the call site changes (from EnsureCertMulti
 // to a native equivalent). The Mosaic config layer stays stable.
 
 namespace Amalgame.Web
@@ -62,7 +72,12 @@ import Amalgame.String
 
 public class AcmeConfig {
     public Enabled:      bool
+    // Primary single-domain field — kept for the v0.10.0 API. When
+    // multi-SAN is in play (Domains.Count() > 0), `Domain` mirrors
+    // Domains[0] so CertPath/KeyPath stay sane. Treat as read-only;
+    // mutate via WithDomain / WithDomains.
     public Domain:       string
+    public Domains:      List<string>  // v0.11.1 — multi-SAN list
     public Email:        string
     public CertDir:      string
     public AcmeServer:   string       // "" = certbot's default (LE prod)
@@ -71,6 +86,7 @@ public class AcmeConfig {
     public AcmeConfig() {
         this.Enabled     = false
         this.Domain      = ""
+        this.Domains     = new List<string>()
         this.Email       = ""
         this.CertDir     = "./certs"
         this.AcmeServer  = ""
@@ -79,11 +95,32 @@ public class AcmeConfig {
 
     // ── Builders ─────────────────────────────────────
     public AcmeConfig WithEnabled(bool e)        { this.Enabled     = e; return this }
-    public AcmeConfig WithDomain(string d)       { this.Domain      = d; return this }
     public AcmeConfig WithEmail(string e)        { this.Email       = e; return this }
     public AcmeConfig WithCertDir(string d)      { this.CertDir     = d; return this }
     public AcmeConfig WithAcmeServer(string s)   { this.AcmeServer  = s; return this }
     public AcmeConfig WithCertbotPath(string p)  { this.CertbotPath = p; return this }
+
+    // Single-domain setter — also resets Domains to [d] so the two
+    // views stay consistent.
+    public AcmeConfig WithDomain(string d) {
+        this.Domain  = d
+        this.Domains = new List<string>()
+        if (String_Length(d) > 0) { this.Domains.Add(d) }
+        return this
+    }
+
+    // Multi-SAN setter — first list element wins as the cert-name
+    // (mirrors certbot's --cert-name <first-d>). Empty list resets
+    // both Domain and Domains.
+    public AcmeConfig WithDomains(List<string> ds) {
+        this.Domains = ds
+        if (ds.Count() > 0) {
+            this.Domain = ds.Get(0)
+        } else {
+            this.Domain = ""
+        }
+        return this
+    }
 
     // ── Validation ───────────────────────────────────
     // Returns "" when the config is sane (enabled + domain + email),
@@ -110,8 +147,9 @@ public class AcmeConfig {
     // Amalgame.Tls` even for apps that only need the paths).
     //
     // certbot's --standalone writes to:
-    //   <cert_dir>/<domain>/fullchain.pem
-    //   <cert_dir>/<domain>/privkey.pem
+    //   <cert_dir>/<cert-name>/fullchain.pem
+    //   <cert_dir>/<cert-name>/privkey.pem
+    // where <cert-name> = first SAN (== this.Domain).
     public string CertPath() {
         return this.CertDir + "/" + this.Domain + "/fullchain.pem"
     }
@@ -119,10 +157,27 @@ public class AcmeConfig {
         return this.CertDir + "/" + this.Domain + "/privkey.pem"
     }
 
+    // ── DomainsCsv — for Acme.EnsureCertMulti ────────
+    // Returns the comma-separated SAN list expected by the
+    // amalgame-tls runtime. Single-domain configs emit "domain"
+    // unchanged; multi-SAN emit "a.com,b.com,c.com" (no spaces —
+    // the C parser strips them anyway but we keep it tight).
+    public string DomainsCsv() {
+        let n = this.Domains.Count()
+        if (n == 0) { return this.Domain }
+        var s: string = this.Domains.Get(0)
+        for i in 1..n {
+            s = s + "," + this.Domains.Get(i)
+        }
+        return s
+    }
+
     // ── FromMap — for the [tls.acme] TOML table ──────
     // Recognised keys:
     //   enabled       "true" | "false"  (default false)
-    //   domain        string  (required when enabled=true)
+    //   domain        string  — single-domain (back-compat, v0.10.0)
+    //   domains       string  — comma-separated multi-SAN (v0.11.1+)
+    //                  When both are set, `domains` wins.
     //   email         string  (required when enabled=true)
     //   cert_dir      string  (default "./certs")
     //   acme_server   string  (default "" = certbot's LE prod)
@@ -130,11 +185,45 @@ public class AcmeConfig {
     public static AcmeConfig FromMap(Map<string, string> cfg) {
         let a = new AcmeConfig()
         if (cfg.Has("enabled"))      { a.Enabled     = (cfg.Get("enabled") == "true") }
-        if (cfg.Has("domain"))       { a.Domain      = cfg.Get("domain") }
+        if (cfg.Has("domain"))       { a.WithDomain(cfg.Get("domain")) }
+        if (cfg.Has("domains")) {
+            let csv: string = cfg.Get("domains")
+            let parts: List<string> = AcmeConfig.SplitCsv(csv)
+            a.WithDomains(parts)
+        }
         if (cfg.Has("email"))        { a.Email       = cfg.Get("email") }
         if (cfg.Has("cert_dir"))     { a.CertDir     = cfg.Get("cert_dir") }
         if (cfg.Has("acme_server"))  { a.AcmeServer  = cfg.Get("acme_server") }
         if (cfg.Has("certbot_path")) { a.CertbotPath = cfg.Get("certbot_path") }
         return a
+    }
+
+    // Parse "a, b , ,c" → ["a", "b", "c"]. Empty entries and
+    // per-element whitespace are dropped (matches the Acme runtime
+    // parser's permissiveness). Same idiom as Csrf.SplitCsv —
+    // intentionally NOT shared because each consumer's surface is
+    // private and we'd rather keep the duplication than punch a
+    // hole for ~12 LoC.
+    public static List<string> SplitCsv(string csv) {
+        let out: List<string> = new List<string>()
+        let n: int = String_Length(csv)
+        if (n == 0) { return out }
+        var start: int = 0
+        var i: int = 0
+        while (i < n) {
+            let c: string = String_CharAt1(csv, i)
+            if (c == ",") {
+                let piece: string = String_Trim(String_Substring(csv, start, i - start))
+                if (String_Length(piece) > 0) { out.Add(piece) }
+                start = i + 1
+            }
+            i = i + 1
+        }
+        // Flush the tail segment.
+        if (n > start) {
+            let piece: string = String_Trim(String_Substring(csv, start, n - start))
+            if (String_Length(piece) > 0) { out.Add(piece) }
+        }
+        return out
     }
 }
