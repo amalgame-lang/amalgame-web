@@ -191,6 +191,18 @@ mkdir -p "$(dirname "$THREADING_CACHE_DIR")"
 rm -rf "$THREADING_CACHE_DIR"
 ln -s "$THREADING_DIR" "$THREADING_CACHE_DIR"
 
+# v0.11.0: net-http also in the cache + lock so PkgRegistry knows
+# Http1.Serve/ServeMt/H1Conn etc. — WebApp.Serve calls them
+# directly. Requires amc >= 0.8.38 (PkgClasses lookup in cgen).
+NETHTTP_PKG_GIT="github.com/amalgame-lang/amalgame-net-http"
+NETHTTP_PKG_TAG="v0.7.0"
+NETHTTP_FAKE_SHA="abcdef0123456789000000000000000000000ef"
+NETHTTP_SHORT_SHA="${NETHTTP_FAKE_SHA:0:8}"
+NETHTTP_CACHE_DIR="$SHARED_FAKE_CACHE/$NETHTTP_PKG_GIT/${NETHTTP_PKG_TAG}_${NETHTTP_SHORT_SHA}"
+mkdir -p "$(dirname "$NETHTTP_CACHE_DIR")"
+rm -rf "$NETHTTP_CACHE_DIR"
+ln -s "$NETHTTP_DIR" "$NETHTTP_CACHE_DIR"
+
 export AMALGAME_PACKAGES_DIR="$SHARED_FAKE_CACHE"
 
 # Write a transient amalgame.lock in $PKG_DIR so amc's
@@ -224,13 +236,27 @@ name = "amalgame-threading"
 git  = "$THREADING_PKG_GIT"
 tag  = "$THREADING_PKG_TAG"
 rev  = "$THREADING_FAKE_SHA"
+
+[[package]]
+name = "amalgame-net-http"
+git  = "$NETHTTP_PKG_GIT"
+tag  = "$NETHTTP_PKG_TAG"
+rev  = "$NETHTTP_FAKE_SHA"
 EOF
 
 # Build sibling facade .o files once, then amalgame-web's own.
 # Order matters: net-http and datetime have no inter-dep; web
 # depends on both. --external on the web build wires the types
 # (HttpResponse from net-http, DateTime from datetime).
-"$AMC" --lib -o "$BUILD_DIR/nethttp" "$NETHTTP_DIR/facade.am" 2>&1 | tail -2
+# v0.11.0: build net-http with ALL its sources (not just facade.am)
+# so the AM-side class bodies (HttpResponse.New(), Cookie methods,
+# HttpParser.*, etc.) are emitted into nethttp.o. The amalgame-web
+# facade build references these symbols; without their bodies in
+# the .o, the final link of each test binary fails. Pre-split
+# net-http (v0.4.5 and earlier) had everything in facade.am; since
+# v0.4.6 the user (or test runner) has to enumerate.
+NETHTTP_SOURCES="$NETHTTP_DIR/facade.am $NETHTTP_DIR/cookie.am $NETHTTP_DIR/http_request.am $NETHTTP_DIR/http_response.am $NETHTTP_DIR/http_parser.am $NETHTTP_DIR/http_server.am $NETHTTP_DIR/http_client.am"
+"$AMC" --lib -o "$BUILD_DIR/nethttp" $NETHTTP_SOURCES 2>&1 | tail -2
 gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$DATETIME_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/nethttp.c" -o "$BUILD_DIR/nethttp.o" 2>&1 | head -5
 [ -s "$BUILD_DIR/nethttp.o" ] || { echo -e "${RED}nethttp build failed${NC}"; exit 1; }
 "$AMC" --lib -o "$BUILD_DIR/datetime" "$DATETIME_DIR/facade.am" 2>&1 | tail -2
@@ -254,9 +280,17 @@ WEB_EXTERNAL_FLAGS=""
 for src in $WEB_SOURCES; do
     WEB_EXTERNAL_FLAGS="$WEB_EXTERNAL_FLAGS --external $src"
 done
+# v0.11.0: net-http is also split (cookie.am / http_request.am / etc.
+# since v0.4.6). The consumer needs ALL of them on --external so amc
+# emits the forward decls + bodies for HttpResponse.New(), Cookie_new,
+# HttpRequest.FromH1Conn etc. — they're referenced from WebApp.Serve
+# closures. amc >= 0.8.38's PkgClasses lookup handles the typedef
+# struct for each (BeginMulti emits them once at the top), but the
+# AM-method bodies still need --external to be picked up by the cgen.
+NETHTTP_EXTERNAL_FLAGS="--external $NETHTTP_DIR/facade.am --external $NETHTTP_DIR/cookie.am --external $NETHTTP_DIR/http_request.am --external $NETHTTP_DIR/http_response.am --external $NETHTTP_DIR/http_parser.am --external $NETHTTP_DIR/http_server.am --external $NETHTTP_DIR/http_client.am"
 
 "$AMC" --lib -o "$BUILD_DIR/facade" $WEB_SOURCES \
-    --external "$NETHTTP_DIR/facade.am" \
+    $NETHTTP_EXTERNAL_FLAGS \
     --external "$DATETIME_DIR/facade.am" \
     --external "$RANDOM_DIR/facade.am" \
     --external "$LOGGING_DIR/facade.am" \
@@ -273,7 +307,7 @@ build_and_run() {
     local src="$2"
     echo -e "\n── ${name} ──"
     "$AMC" -o "$BUILD_DIR/$name" "$src" \
-        --external "$NETHTTP_DIR/facade.am" \
+        $NETHTTP_EXTERNAL_FLAGS \
         --external "$DATETIME_DIR/facade.am" \
         --external "$RANDOM_DIR/facade.am" \
         --external "$LOGGING_DIR/facade.am" \
@@ -295,5 +329,6 @@ build_and_run web_app_test               tests/web_app_test.am
 build_and_run signed_cookie_session_test tests/signed_cookie_session_test.am
 build_and_run redis_session_test         tests/redis_session_test.am
 build_and_run acme_config_test           tests/acme_config_test.am
+build_and_run webapp_serve_smoke_test    tests/webapp_serve_smoke_test.am
 
 echo -e "\n${GREEN}All tests completed${NC}"

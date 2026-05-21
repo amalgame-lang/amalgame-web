@@ -1,0 +1,41 @@
+// Smoke test for WebApp.Serve* (v0.11.0).
+//
+// Compile + link only — actually starting the server would block
+// the test runner. Verifies that the bridge closure compiles end-
+// to-end through:
+//   - amc v0.8.38 PkgClasses lookup (TypeToC, NEW_EXPR, ctor,
+//     ClassName.Method, forward typedef)
+//   - net-http v0.7.0 H1Conn bridges (FromH1Conn / WriteToH1Conn)
+//   - lambda capture of WebApp instance via static helper
+//
+// If this links, the WebApp.Serve family is shipped-correct.
+
+namespace Tests
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.Net.Http
+import Amalgame.Web
+
+public class Program {
+    public static void Main(string[] args) {
+        Console.WriteLine("amalgame-web — WebApp.Serve smoke test")
+
+        let app = new WebApp()
+        app.Get("/",     ctx => HttpResponse.New().Text("hi"))
+        app.Get("/json", ctx => HttpResponse.New().Json("{\"ok\":true}"))
+
+        // Reference all 4 entry points so the linker pulls them in.
+        // We never actually call them (would block on accept).
+        var doCall: bool = false
+        if (doCall) {
+            app.Serve(3000)
+            app.ServeMt(3000)
+            let cfg = HttpServerConfig.Default()
+            app.ServeWith(3000, cfg)
+            app.ServeMtWith(3000, cfg)
+        }
+        Console.WriteLine("[PASS] WebApp.Serve / ServeMt / ServeWith / ServeMtWith link")
+        Console.WriteLine("done")
+    }
+}

@@ -201,4 +201,92 @@ public class WebApp {
         }
         return resp
     }
+
+    // ── v0.11.0: Drop-in HTTP/1.1 server entry points ─
+    //
+    // Each builds the H1Conn → HttpRequest → Handle →
+    // HttpResponse → H1Conn bridge closure once, then forwards to
+    // amalgame-net-http's `Http1.*` family. The conn arrives typed
+    // as int (pointer-as-i64 handle) — see HttpRequest.FromH1Conn
+    // / HttpResponse.WriteToH1Conn for the rationale.
+    //
+    // Pick by deployment model:
+    //
+    //   Serve(port)             — single-thread accept loop. Use
+    //                             for local dev and small apps.
+    //   ServeMt(port)           — thread-per-connection. Use when
+    //                             handlers do I/O.
+    //   ServeWith(port, cfg)    — single-thread + HttpServerConfig
+    //                             (timeouts, size limits, keep-alive).
+    //   ServeMtWith(port, cfg)  — production default: multi-thread
+    //                             + keep-alive + config.
+    //
+    // Returns the underlying Http1_Serve* exit code: 0 on clean
+    // shutdown (unreachable — loops forever), -1 on null handler,
+    // -2 on bind failure.
+    public int Serve(int port) {
+        return WebApp.ServeImpl(this, port)
+    }
+    public int ServeMt(int port) {
+        return WebApp.ServeMtImpl(this, port)
+    }
+    public int ServeWith(int port, cfg: AmalgameNetHttpServerConfig) {
+        return WebApp.ServeWithImpl(this, port, cfg)
+    }
+    public int ServeMtWith(int port, cfg: AmalgameNetHttpServerConfig) {
+        return WebApp.ServeMtWithImpl(this, port, cfg)
+    }
+
+    // Static implementations — typed `app: WebApp` so the lambda env
+    // captures the type correctly. amc tracks the type of `let x = this`
+    // less reliably than a typed parameter in v0.8.38; the static
+    // form sidesteps that until the resolver propagates `this`'s class
+    // type into the local binding.
+    public static int ServeImpl(app: WebApp, port: int) {
+        let handler = conn => {
+            var cInt: int = 0
+            @c { cInt = (i64)(uintptr_t) conn; }
+            let req: HttpRequest = HttpRequest.FromH1Conn(cInt)
+            let resp: HttpResponse = app.Handle(req)
+            resp.WriteToH1Conn(cInt)
+            return 0
+        }
+        return Http1.Serve(port, handler)
+    }
+
+    public static int ServeMtImpl(app: WebApp, port: int) {
+        let handler = conn => {
+            var cInt: int = 0
+            @c { cInt = (i64)(uintptr_t) conn; }
+            let req: HttpRequest = HttpRequest.FromH1Conn(cInt)
+            let resp: HttpResponse = app.Handle(req)
+            resp.WriteToH1Conn(cInt)
+            return 0
+        }
+        return Http1.ServeMt(port, handler)
+    }
+
+    public static int ServeWithImpl(app: WebApp, port: int, cfg: AmalgameNetHttpServerConfig) {
+        let handler = conn => {
+            var cInt: int = 0
+            @c { cInt = (i64)(uintptr_t) conn; }
+            let req: HttpRequest = HttpRequest.FromH1Conn(cInt)
+            let resp: HttpResponse = app.Handle(req)
+            resp.WriteToH1Conn(cInt)
+            return 0
+        }
+        return Http1.ServeWith(port, cfg, handler)
+    }
+
+    public static int ServeMtWithImpl(app: WebApp, port: int, cfg: AmalgameNetHttpServerConfig) {
+        let handler = conn => {
+            var cInt: int = 0
+            @c { cInt = (i64)(uintptr_t) conn; }
+            let req: HttpRequest = HttpRequest.FromH1Conn(cInt)
+            let resp: HttpResponse = app.Handle(req)
+            resp.WriteToH1Conn(cInt)
+            return 0
+        }
+        return Http1.ServeMtWith(port, cfg, handler)
+    }
 }
