@@ -1,0 +1,99 @@
+// amalgame-web — TlsBindingConfig (v0.11.2).
+//
+// Configuration helper for TLS-level knobs that Mosaic surfaces in
+// `mosaic.toml` under `[tls]`. Pairs with amalgame-net-http v0.7.1's
+// HttpServerConfig.WithTlsMinVersion / WithTlsAlpn — once user code
+// owns a TlsBindingConfig, the wiring into HttpServerConfig is a
+// two-call sequence (`.WithTlsMinVersion(t.MinVersionInt())` /
+// `.WithTlsAlpn(t.Alpn)`).
+//
+// Sibling of AcmeConfig — same FromMap / Validate / builder shape.
+// Kept SEPARATE because:
+//   - [tls.acme] is about cert provisioning (input to Acme.EnsureCertMulti)
+//   - [tls] (top-level minus the [acme] subtable) is about runtime
+//     behaviour of the live TLS listener.
+// Conflating them would force apps that ship a static cert+key to
+// load an AcmeConfig anyway, just to read min_version.
+//
+// User pattern (`amc package add tls + net-http`):
+//
+//   import Amalgame.Web
+//   import Amalgame.Net.Http
+//
+//   let t = TlsBindingConfig.FromMap(tomlTlsSection)
+//   let cfg = HttpServerConfig.Default()
+//               .WithTlsMinVersion(t.MinVersionInt())
+//               .WithTlsAlpn(t.Alpn)
+//   Https.ServeWith(443, certPath, keyPath, cfg, handler)
+//
+// TOML schema read here (subset of [tls] from docs/mosaic-configuration.md):
+//
+//   [tls]
+//   min_version = "1.3"           # "1.2" | "1.3", default "1.3"
+//   alpn        = "h2,http/1.1"   # comma-separated, default "h2"
+//
+// Status (v0.11.2):
+//   min_version — fully wired through to OpenSSL via net-http v0.7.1
+//   alpn        — parsed and forwarded to HttpServerConfig, but the
+//                 net-http ALPN select callback still hardcodes "h2";
+//                 setting anything else emits a warning. Wired when
+//                 net-http v0.7.2 ships http/1.1 fallback. The
+//                 AcmeConfig multi-SAN pattern (v0.11.1) gave us the
+//                 shape — TlsBindingConfig fits in the same slot.
+
+namespace Amalgame.Web
+
+import Amalgame.Collections
+import Amalgame.String
+
+public class TlsBindingConfig {
+    public MinVersion: string      // "1.2" | "1.3"
+    public Alpn:       string      // comma-separated, e.g. "h2,http/1.1"
+
+    public TlsBindingConfig() {
+        this.MinVersion = "1.3"    // browsers + reasonable servers — safe default
+        this.Alpn       = "h2"     // matches net-http's current select_cb
+    }
+
+    // ── Builders ─────────────────────────────────────
+    public TlsBindingConfig WithMinVersion(string v) { this.MinVersion = v; return this }
+    public TlsBindingConfig WithAlpn(string a)       { this.Alpn       = a; return this }
+
+    // ── Encoders for the net-http runtime ────────────
+    // HttpServerConfig.WithTlsMinVersion takes 12 or 13 (integers).
+    // We translate the user-facing TOML strings into those ints.
+    // Any unrecognised value falls back to 12 (TLS 1.2) — the runtime
+    // treats any other value as "library default" so this matches the
+    // net-http behaviour exactly.
+    public int MinVersionInt() {
+        if (this.MinVersion == "1.3") { return 13 }
+        if (this.MinVersion == "1.2") { return 12 }
+        return 12
+    }
+
+    // ── Validation ───────────────────────────────────
+    // Returns "" when the config is sane, single-line reason
+    // otherwise. Catches the most common typo (e.g. "tls1.3").
+    public string Validate() {
+        if (this.MinVersion != "1.2" && this.MinVersion != "1.3") {
+            return "tls.min_version must be \"1.2\" or \"1.3\", got: " + this.MinVersion
+        }
+        if (String_Length(this.Alpn) == 0) {
+            return "tls.alpn must not be empty (use \"h2\" if unsure)"
+        }
+        return ""
+    }
+
+    // ── FromMap — for the [tls] TOML section (minus [tls.acme]) ──
+    // Recognised keys:
+    //   min_version  "1.2" | "1.3"  (default "1.3")
+    //   alpn         string         (default "h2")
+    // Unknown keys are ignored — keeps forward-compat with future
+    // knobs (cipher_suites, session_tickets, …).
+    public static TlsBindingConfig FromMap(Map<string, string> cfg) {
+        let t = new TlsBindingConfig()
+        if (cfg.Has("min_version")) { t.MinVersion = cfg.Get("min_version") }
+        if (cfg.Has("alpn"))        { t.Alpn       = cfg.Get("alpn")        }
+        return t
+    }
+}
