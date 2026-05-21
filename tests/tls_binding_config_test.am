@@ -1,0 +1,124 @@
+// Unit tests for TlsBindingConfig (v0.11.2).
+//
+// Pure-config class — does NOT spin up a TLS server. Verifies the
+// builder, FromMap parsing, MinVersionInt translation and Validate.
+
+namespace Tests
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.Net.Http
+import Amalgame.Web
+
+public class Program {
+    public static void Main(string[] args) {
+        Console.WriteLine("amalgame-web — TlsBindingConfig tests")
+
+        // ── 1. Defaults ─────────────────────────────────────────
+        let a = new TlsBindingConfig()
+        if (a.MinVersion == "1.3" && a.Alpn == "h2") {
+            Console.WriteLine("[PASS] defaults")
+        } else {
+            Console.WriteLine("[FAIL] defaults: " + a.MinVersion + " / " + a.Alpn)
+        }
+
+        // ── 2. Builders compose ─────────────────────────────────
+        let b = new TlsBindingConfig()
+            .WithMinVersion("1.2")
+            .WithAlpn("h2,http/1.1")
+        if (b.MinVersion == "1.2" && b.Alpn == "h2,http/1.1") {
+            Console.WriteLine("[PASS] builders compose")
+        } else {
+            Console.WriteLine("[FAIL] builders: " + b.MinVersion + " / " + b.Alpn)
+        }
+
+        // ── 3. MinVersionInt — 1.3 → 13 ─────────────────────────
+        let v13 = new TlsBindingConfig().WithMinVersion("1.3")
+        if (v13.MinVersionInt() == 13) {
+            Console.WriteLine("[PASS] MinVersionInt 1.3 → 13")
+        } else {
+            Console.WriteLine("[FAIL] 1.3 → " + String_FromInt(v13.MinVersionInt()))
+        }
+
+        // ── 4. MinVersionInt — 1.2 → 12 ─────────────────────────
+        let v12 = new TlsBindingConfig().WithMinVersion("1.2")
+        if (v12.MinVersionInt() == 12) {
+            Console.WriteLine("[PASS] MinVersionInt 1.2 → 12")
+        } else {
+            Console.WriteLine("[FAIL] 1.2 → " + String_FromInt(v12.MinVersionInt()))
+        }
+
+        // ── 5. MinVersionInt — bad value → 12 fallback ──────────
+        let bad = new TlsBindingConfig().WithMinVersion("tls1.3")
+        if (bad.MinVersionInt() == 12) {
+            Console.WriteLine("[PASS] MinVersionInt bad-value fallback")
+        } else {
+            Console.WriteLine("[FAIL] bad fallback: " + String_FromInt(bad.MinVersionInt()))
+        }
+
+        // ── 6. Validate — defaults pass ─────────────────────────
+        if (a.Validate() == "") {
+            Console.WriteLine("[PASS] defaults validate clean")
+        } else {
+            Console.WriteLine("[FAIL] defaults rejected: " + a.Validate())
+        }
+
+        // ── 7. Validate — bad min_version → error ───────────────
+        if (String_Contains(bad.Validate(), "tls1.3")) {
+            Console.WriteLine("[PASS] bad min_version detected")
+        } else {
+            Console.WriteLine("[FAIL] bad min_version: " + bad.Validate())
+        }
+
+        // ── 8. Validate — empty alpn → error ────────────────────
+        let noAlpn = new TlsBindingConfig().WithAlpn("")
+        if (String_Contains(noAlpn.Validate(), "alpn")) {
+            Console.WriteLine("[PASS] empty alpn detected")
+        } else {
+            Console.WriteLine("[FAIL] empty alpn: " + noAlpn.Validate())
+        }
+
+        // ── 9. FromMap — all keys ───────────────────────────────
+        let cfg = new Map<string, string>()
+        cfg.Set("min_version", "1.2")
+        cfg.Set("alpn", "h2,http/1.1")
+        let m = TlsBindingConfig.FromMap(cfg)
+        if (m.MinVersion == "1.2"
+            && m.Alpn == "h2,http/1.1"
+            && m.MinVersionInt() == 12) {
+            Console.WriteLine("[PASS] FromMap composes attrs")
+        } else {
+            Console.WriteLine("[FAIL] FromMap: " + m.MinVersion + " / " + m.Alpn)
+        }
+
+        // ── 10. FromMap — empty map = defaults ──────────────────
+        let empty = new Map<string, string>()
+        let d = TlsBindingConfig.FromMap(empty)
+        if (d.MinVersion == "1.3" && d.Alpn == "h2") {
+            Console.WriteLine("[PASS] FromMap empty = defaults")
+        } else {
+            Console.WriteLine("[FAIL] FromMap empty: " + d.MinVersion + " / " + d.Alpn)
+        }
+
+        // ── 11. End-to-end wiring smoke — net-http HttpServerConfig ──
+        // The whole point of TlsBindingConfig is feeding HttpServerConfig.
+        // Verify the cast lands without warnings/typecheck errors and
+        // the round-trip via getters returns what we sent.
+        let t = new TlsBindingConfig()
+            .WithMinVersion("1.3")
+            .WithAlpn("h2,http/1.1")
+        let hsc: AmalgameNetHttpServerConfig = HttpServerConfig.Default()
+        let hsc2: AmalgameNetHttpServerConfig = HttpServerConfig.WithTlsMinVersion(hsc, t.MinVersionInt())
+        let hsc3: AmalgameNetHttpServerConfig = HttpServerConfig.WithTlsAlpn(hsc2, t.Alpn)
+        if (HttpServerConfig.TlsMinVersion(hsc3) == 13
+            && HttpServerConfig.TlsAlpn(hsc3) == "h2,http/1.1") {
+            Console.WriteLine("[PASS] wiring to HttpServerConfig round-trips")
+        } else {
+            Console.WriteLine("[FAIL] wiring: minVer="
+                + String_FromInt(HttpServerConfig.TlsMinVersion(hsc3))
+                + " alpn=" + HttpServerConfig.TlsAlpn(hsc3))
+        }
+
+        Console.WriteLine("done")
+    }
+}
