@@ -26,7 +26,7 @@
 
 [package]
 name              = "amalgame-web"
-version           = "0.12.2"
+version           = "0.12.3"
 license           = "Apache-2.0"
 description       = "Mosaic — the Amalgame web framework runtime library."
 required-amalgame = ">=0.8.39"
@@ -36,7 +36,7 @@ schema-version    = 1
 # these recursively on `amc package add web`.
 [dependencies]
 amalgame-tls                    = ">=0.3.1"
-amalgame-net-http               = ">=0.9.3"
+amalgame-net-http               = ">=0.9.4"
 amalgame-crypto                 = ">=0.3.0"
 amalgame-datetime               = ">=0.1.0"
 amalgame-random                 = ">=0.1.0"
