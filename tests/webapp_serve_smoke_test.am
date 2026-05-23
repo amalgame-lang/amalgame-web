@@ -34,8 +34,10 @@ public class Program {
             let cfg = HttpServerConfig.Default()
             app.ServeWith(3000, cfg)
             app.ServeMtWith(3000, cfg)
+            // v0.12.0: fiber-driven entry point.
+            app.ServeAsync(3000)
         }
-        Console.WriteLine("[PASS] WebApp.Serve / ServeMt / ServeWith / ServeMtWith link")
+        Console.WriteLine("[PASS] WebApp.Serve / ServeMt / ServeWith / ServeMtWith / ServeAsync link")
         Console.WriteLine("done")
     }
 }

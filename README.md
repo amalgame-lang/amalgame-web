@@ -129,6 +129,51 @@ public class Program {
 }
 ```
 
+## Server entry points
+
+`WebApp` exposes five drop-in serve methods (since v0.12.0); pick
+by deployment model:
+
+| Method | Concurrency | Best for | Platform |
+|---|---|---|---|
+| `app.Serve(port)` | serial | dev / smoke / single-user | all |
+| `app.ServeMt(port)` | 1 thread per conn (~8 MB lazy stack) | CPU-bound handlers | all |
+| `app.ServeWith(port, cfg)` | serial + `HttpServerConfig` knobs | keep-alive + size limits | all |
+| `app.ServeMtWith(port, cfg)` | multi-thread + config | the previous default for prod | all |
+| **`app.ServeAsync(port)`** (v0.12.0) | **1 thread, N fibers (~64 KB / conn)** | **I/O-bound handlers** | **Linux only (epoll)** |
+
+### When to pick `ServeAsync`
+
+Per the benchmark in
+[`amalgame-net-http/bench/`](https://github.com/amalgame-lang/amalgame-net-http/tree/main/bench)
+(100 ms sleeping handler, asyncio client opening N concurrent
+connections on a 2-core / 4 GB Linux box):
+
+| N    | `ServeMt`              | `ServeAsync`            |
+|------|------------------------|-------------------------|
+| 100  | 1152 ms · 100/100      | **123 ms** · 100/100    |
+| 500  | 2071 ms · 500/500      | **1374 ms** · 500/500   |
+| 1000 | 2932 ms · 1000/1000    | **1628 ms** · 1000/1000 |
+| 2000 | 31220 ms · **1665/2000** ⚠ | **1453 ms · 2000/2000** ✅ |
+
+- **Pick `ServeAsync` when handlers do downstream I/O** (DB
+  queries, HTTP client calls, file writes). The fiber parks
+  during the wait; the scheduler advances another connection
+  on the same OS thread. ServeMt blocks one OS thread per
+  in-flight request.
+- **Pick `ServeMtWith` when handlers are CPU-bound.** Async only
+  amortises over I/O parks — pure compute can't be overlapped
+  on a single OS thread.
+- **`ServeAsync` is Linux-only in v0.12.0** (epoll). kqueue (BSD
+  + macOS) lands in `amalgame-async` v0.2.1, IOCP (Windows) in
+  v0.3; `ServeAsync` will become cross-platform automatically
+  once those backends ship.
+- HTTP/1.1 keep-alive is on by default (RFC 7230 rules).
+- `HttpServerConfig` knobs (per-conn timeouts, body size limits)
+  aren't wired into `ServeAsync` yet — that's `ServeAsyncWith` in
+  v0.12.1 once `amalgame-net-http` v0.9.3 ships
+  `Http1.ServeAsyncWith`.
+
 ## Router matching rules
 
 | Pattern | Matches | Captures |

@@ -45,7 +45,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: amalgame-lang/amalgame-net-http
-          ref: v0.7.1
+          ref: v0.9.2
           path: amalgame-net-http
 
       # v0.6.0+: RateLimit uses `DateTime.NowMonotonicNanos()` from
@@ -95,6 +95,15 @@ jobs:
           ref: v0.1.0
           path: amalgame-threading
 
+      # v0.12.0+: WebApp.ServeAsync routes through amalgame-net-http
+      # v0.9.1+'s Http1.ServeAsync, which #includes Amalgame_Async.h
+      # unconditionally. C-only package, same fake-cache pattern.
+      - uses: actions/checkout@v4
+        with:
+          repository: amalgame-lang/amalgame-async
+          ref: v0.2.0
+          path: amalgame-async
+
       - name: Install system deps
         run: |
           sudo apt-get update -qq
@@ -122,4 +131,5 @@ jobs:
           AMALGAME_CRYPTO:   ${{ github.workspace }}/amalgame-crypto
           AMALGAME_DB_REDIS: ${{ github.workspace }}/amalgame-database-nosql-redis
           AMALGAME_THREADING: ${{ github.workspace }}/amalgame-threading
+          AMALGAME_ASYNC:     ${{ github.workspace }}/amalgame-async
         run: ./tests/run_tests.sh "$AMC"
