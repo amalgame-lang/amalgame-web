@@ -45,7 +45,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: amalgame-lang/amalgame-net-http
-          ref: v0.9.4
+          ref: v0.9.5
           path: amalgame-net-http
 
       # v0.6.0+: RateLimit uses `DateTime.NowMonotonicNanos()` from
@@ -101,7 +101,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: amalgame-lang/amalgame-async
-          ref: v0.2.1
+          ref: v0.2.2
           path: amalgame-async
 
       - name: Install system deps
