@@ -26,7 +26,7 @@
 
 [package]
 name              = "amalgame-web"
-version           = "0.12.0"
+version           = "0.12.1"
 license           = "Apache-2.0"
 description       = "Mosaic — the Amalgame web framework runtime library."
 required-amalgame = ">=0.8.39"
@@ -47,7 +47,7 @@ amalgame-threading              = ">=0.1.0"
 # which transitively requires amalgame-async ≥ 0.2.0. Declared
 # here for the dep solver — also picked up automatically via the
 # net-http manifest, but explicit beats implicit.
-amalgame-async                  = ">=0.2.0"
+amalgame-async                  = ">=0.2.1"
 
 [stdlib]
 classes   = [
