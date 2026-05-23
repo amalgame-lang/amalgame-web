@@ -318,4 +318,26 @@ public class WebApp {
         }
         return Http1.ServeAsync(port, handler)
     }
+
+    // v0.12.2: ServeAsync + per-conn HttpServerConfig. Wraps
+    // amalgame-net-http v0.9.3+'s Http1.ServeAsyncWith. The config
+    // knobs honored on the async path:
+    //   - max_body_bytes / max_header_bytes / max_url_bytes
+    //   - listen_backlog
+    //   - idle_timeout_sec > 0 → HTTP/1.1 keep-alive on (matches
+    //     ServeWith semantics; configs are portable across all 4
+    //     Serve* variants).
+    // Not yet wired (deferred to v0.12.3 + net-http v0.9.4):
+    //   - header_timeout_sec / body_timeout_sec (today: fixed 30s
+    //     default in the async recv helpers).
+    public int ServeAsyncWith(int port, cfg: AmalgameNetHttpServerConfig) {
+        let app = this
+        let handler = conn => {
+            let req: HttpRequest = HttpRequest.FromH1Conn(conn)
+            let resp: HttpResponse = app.Handle(req)
+            resp.WriteToH1Conn(conn)
+            return 0
+        }
+        return Http1.ServeAsyncWith(port, cfg, handler)
+    }
 }
