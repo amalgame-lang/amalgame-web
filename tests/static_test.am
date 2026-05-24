@@ -105,35 +105,43 @@ public class Program {
             Console.WriteLine("[FAIL] POST got: " + String_FromInt(rPost.StatusCode))
         }
 
-        // ── 5. 404 for missing file ──────────────────────────────
+        // ── 5. Missing file → null (fall through to router) ──────
+        // v0.13.1: Static is additive — defers to router when it
+        // can't positively serve a file. Pre-v0.13.1 returned 404.
         let reqMissing = new HttpRequest()
         reqMissing.Method = "GET"
         reqMissing.Path = "/assets/does-not-exist.png"
         let rMissing = st.Serve(reqMissing)
-        if (rMissing != null && rMissing.StatusCode == 404) {
-            Console.WriteLine("[PASS] missing file → 404")
+        if (rMissing == null) {
+            Console.WriteLine("[PASS] missing file → null (fall through)")
         } else {
             Console.WriteLine("[FAIL] missing got: " + String_FromInt(rMissing.StatusCode))
         }
 
-        // ── 6. 403 for exact-prefix (would be dir listing) ───────
+        // ── 6. Exact-prefix → null (defer to router) ─────────────
+        // v0.13.1: pre-v0.13.1 returned 403 to block dir listing,
+        // but that ate the router's index route on /-mounted Static.
+        // Now returns null so the user's `app/index.am`-style
+        // handler runs.
         let reqDir = new HttpRequest()
         reqDir.Method = "GET"
         reqDir.Path = "/assets"
         let rDir = st.Serve(reqDir)
-        if (rDir != null && rDir.StatusCode == 403) {
-            Console.WriteLine("[PASS] exact-prefix → 403 (no dir listing)")
+        if (rDir == null) {
+            Console.WriteLine("[PASS] exact-prefix → null (defer to router)")
         } else {
             Console.WriteLine("[FAIL] exact-prefix got: " + String_FromInt(rDir.StatusCode))
         }
 
-        // ── 7. 403 for directory below mount ─────────────────────
+        // ── 7. Subdirectory → null (defer to router) ─────────────
+        // v0.13.1: subdirs no longer 403 — they fall through, same
+        // rationale as missing files.
         let reqSubdir = new HttpRequest()
         reqSubdir.Method = "GET"
         reqSubdir.Path = "/assets/nested"
         let rSubdir = st.Serve(reqSubdir)
-        if (rSubdir != null && rSubdir.StatusCode == 403) {
-            Console.WriteLine("[PASS] subdirectory → 403")
+        if (rSubdir == null) {
+            Console.WriteLine("[PASS] subdirectory → null (defer to router)")
         } else {
             Console.WriteLine("[FAIL] subdir got: " + String_FromInt(rSubdir.StatusCode))
         }
