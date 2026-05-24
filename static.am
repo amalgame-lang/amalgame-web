@@ -92,6 +92,14 @@ public class Static {
         if (un < pn) { return false }
         if (String_Substring(urlPath, 0, pn) != p) { return false }
         if (un == pn) { return true }
+        // Boundary check: when prefix is non-root ("/assets"), the
+        // next char must be "/" so we don't match "/assets-other".
+        // For the root mount ("/"), every absolute URL path starts
+        // with "/" already (which IS the prefix), so the boundary
+        // is implicitly satisfied — every path is a child. Skip
+        // the check, otherwise "/" only matches "/" and not the
+        // typical "/style.css" / "/favicon.ico" etc.
+        if (p == "/") { return true }
         return String_CharAt1(urlPath, pn) == "/"
     }
 
@@ -123,10 +131,20 @@ public class Static {
         // Strip the URL prefix; keep the remainder ("/" if
         // exact-prefix). Then compose with the filesystem root and
         // normalize lexically to collapse `..`.
-        let pn: int = String_Length(this.Prefix)
+        //
+        // Edge case for prefix="/": pn=1 so substring(path, 1, ...)
+        // drops the leading slash, leaving "style.css" — joined to
+        // "./public" yields "./publicstyle.css". Skip the strip in
+        // that case; rel inherits req.Path verbatim (already starts
+        // with /).
         var rel: string = ""
-        if (String_Length(req.Path) > pn) {
-            rel = String_Substring(req.Path, pn, String_Length(req.Path) - pn)
+        if (this.Prefix == "/") {
+            rel = req.Path
+        } else {
+            let pn: int = String_Length(this.Prefix)
+            if (String_Length(req.Path) > pn) {
+                rel = String_Substring(req.Path, pn, String_Length(req.Path) - pn)
+            }
         }
         if (rel == "" || rel == "/") {
             // Exact-prefix — defer to router. The user has either
