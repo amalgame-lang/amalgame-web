@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        amc-tag: [v0.8.48]
+        amc-tag: [v0.8.50]
     services:
       # v0.8.4+: redis_session_test exercises RedisSessionStore
       # against a live RESP2 server. The test SKIPs cleanly when no
