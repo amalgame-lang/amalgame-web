@@ -1,0 +1,269 @@
+// amalgame-web — Static-file middleware (v0.13.0).
+//
+// Mounts a directory on the filesystem at a URL prefix. The
+// Mosaic equivalent of nginx's `location /assets { root … }` and
+// Apache's `Alias /assets /var/www/static`.
+//
+// Scope of v0.1 (this file):
+//   - Prefix matching: req.Path starts with the mount prefix.
+//   - Safe path resolution: Path_Normalize + absolute-prefix
+//     containment check blocks `../` traversal.
+//   - File-vs-dir discrimination: serving `/assets/` (a dir) is
+//     a 403, not a 404 — directory listing is explicitly not
+//     supported. Serving a non-existent file is a 404.
+//   - MIME inference from Path_GetExtension. ~35 common types
+//     baked in; unknown extensions fall back to
+//     application/octet-stream.
+//   - ETag = `"size-mtime"` (decimal-decimal). `If-None-Match`
+//     match → 304 with no body.
+//   - Binary-safe transport via HttpResponse.File(path) — the
+//     wire-out (WriteToH1Conn) routes to H1Conn_RespondFile so
+//     PNG / JPEG / PDF / WASM survive NUL bytes intact.
+//
+// Deferred to v0.2 / v0.3 (see docs/proposals/beyond-http.md):
+//   - Range requests (`Range: bytes=N-M`). Needs a runtime
+//     H1Conn_RespondFileRange(c, status, ct, path, off, len).
+//     Today, the whole file is sent.
+//   - Last-Modified (HTTP-date format). Needs an HTTP-date
+//     helper in amalgame-datetime (today's FormatIso emits ISO
+//     8601, which `If-Modified-Since` consumers won't grok).
+//     ETag covers the common cache-revalidation path on its
+//     own — every major browser honors If-None-Match.
+//   - Pre-compressed (`.gz` / `.br`) variant selection based
+//     on Accept-Encoding.
+//   - sendfile(2) zero-copy. RespondFile currently GC_MALLOCs
+//     the bytes; fine for typical assets (<10 MB), wasteful
+//     for large downloads.
+//
+// Usage:
+//
+//     let app = WebApp.New()
+//         .WithStatic(Static.New("/assets", "./public"))
+//         .Get("/", ctx => HttpResponse.New().Html("<h1>Hi</h1>"))
+//
+//     // GET /assets/logo.png  →  ./public/logo.png served with
+//     //   Content-Type: image/png
+//     //   ETag: "12345-1700000000"
+//     //   Cache-Control: public, max-age=3600 (when configured)
+
+namespace Amalgame.Web
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.IO
+
+public class Static {
+    public Prefix:        string  // URL prefix, normalized to start with "/" and NOT end with "/"
+    public Root:          string  // filesystem root, absolute or relative
+    public CacheMaxAge:   int     // seconds; 0 = don't emit Cache-Control
+
+    public Static() {
+        this.Prefix      = ""
+        this.Root        = ""
+        this.CacheMaxAge = 0
+    }
+
+    // Build a Static mount. `prefix` should be a URL path segment
+    // such as "/assets"; trailing slash is normalized off. `dir`
+    // is the filesystem root from which files are served; relative
+    // paths resolve against the app's cwd.
+    public static Static New(string prefix, string dir) {
+        let s = new Static()
+        s.Prefix = Static.NormalizePrefix(prefix)
+        s.Root   = Static.NormalizeRoot(dir)
+        return s
+    }
+
+    public Static WithCacheMaxAge(int seconds) {
+        this.CacheMaxAge = seconds
+        return this
+    }
+
+    // True iff `path` falls under this mount's prefix. Uses an
+    // explicit boundary check ("/assets" matches "/assets/foo" but
+    // not "/assets-other"). The prefix is stored without a
+    // trailing slash, so we accept either the exact prefix
+    // (e.g. "/assets" → maps to the root dir's index, currently
+    // 403) or `prefix + "/<rest>"`.
+    public bool Matches(string urlPath) {
+        let p: string = this.Prefix
+        let pn: int = String_Length(p)
+        let un: int = String_Length(urlPath)
+        if (un < pn) { return false }
+        if (String_Substring(urlPath, 0, pn) != p) { return false }
+        if (un == pn) { return true }
+        return String_CharAt1(urlPath, pn) == "/"
+    }
+
+    // Resolve the request to an HttpResponse. Returns null if the
+    // path doesn't match this mount (the caller should fall
+    // through to the router). Otherwise always returns an
+    // HttpResponse (200 / 304 / 403 / 404). Never throws.
+    public HttpResponse Serve(HttpRequest req) {
+        if (!this.Matches(req.Path)) { return null }
+        // Only GET (and HEAD, future) maps to a static file. Other
+        // methods get 405 — never call the router for a path under
+        // a static mount with a wrong method.
+        if (req.Method != "GET" && req.Method != "HEAD") {
+            return HttpResponse.New().Status(405).Text("Method Not Allowed")
+        }
+        // Strip the URL prefix; keep the remainder ("/" if
+        // exact-prefix). Then compose with the filesystem root and
+        // normalize lexically to collapse `..`.
+        let pn: int = String_Length(this.Prefix)
+        var rel: string = ""
+        if (String_Length(req.Path) > pn) {
+            rel = String_Substring(req.Path, pn, String_Length(req.Path) - pn)
+        }
+        if (rel == "" || rel == "/") {
+            // Exact-prefix request — by convention a 403, not an
+            // index listing. Apps that want a homepage at /assets
+            // should register a route handler for it.
+            return HttpResponse.New().Status(403).Text("Forbidden")
+        }
+        let joined: string = this.Root + rel
+        let normalized: string = Path_Normalize(joined)
+        // Containment check: the normalized path MUST still start
+        // with the normalized Root prefix. This blocks `../`
+        // traversal even after Path_Normalize collapses the
+        // dots, because if `..` would have escaped the root, the
+        // normalize step removes the trailing root segment too.
+        let rootNorm: string = Path_Normalize(this.Root)
+        let rn: int = String_Length(rootNorm)
+        if (String_Length(normalized) < rn
+            || String_Substring(normalized, 0, rn) != rootNorm) {
+            return HttpResponse.New().Status(403).Text("Forbidden")
+        }
+        // Refuse if the path resolves to a directory or is
+        // missing. File_IsFile catches both (returns false for
+        // dirs and for missing files); we use File_Exists +
+        // File_IsDir to distinguish the two for the right
+        // status code (403 vs 404).
+        if (!File_Exists(normalized)) {
+            return HttpResponse.New().Status(404).Text("Not Found")
+        }
+        if (File_IsDir(normalized)) {
+            return HttpResponse.New().Status(403).Text("Forbidden")
+        }
+        if (!File_IsFile(normalized)) {
+            return HttpResponse.New().Status(403).Text("Forbidden")
+        }
+        // ETag = "size-mtime" decimal. Quoted per RFC 7232.
+        let size: int = File_Size(normalized)
+        let mtime: int = File_Mtime(normalized)
+        let etag: string = "\"" + String_FromInt(size) + "-" + String_FromInt(mtime) + "\""
+        // Conditional GET — If-None-Match match → 304 with no body
+        // but the same ETag header (browsers re-cache on it).
+        let inm: string = req.Header("if-none-match")
+        if (inm != "" && inm == etag) {
+            var notMod: HttpResponse = HttpResponse.New().Status(304)
+            notMod.Header("ETag", etag)
+            if (this.CacheMaxAge > 0) {
+                notMod.Header("Cache-Control", "public, max-age=" + String_FromInt(this.CacheMaxAge))
+            }
+            return notMod
+        }
+        // 200 OK — bind file by path so WriteToH1Conn uses the
+        // binary-safe RespondFile entry. MIME from extension.
+        let ct: string = Static.MimeByExtension(Path_GetExtension(normalized))
+        var resp: HttpResponse = HttpResponse.New()
+            .Status(200)
+            .Header("Content-Type", ct)
+            .Header("ETag", etag)
+            .File(normalized)
+        if (this.CacheMaxAge > 0) {
+            resp.Header("Cache-Control", "public, max-age=" + String_FromInt(this.CacheMaxAge))
+        }
+        return resp
+    }
+
+    // ── Builders for config-file driven instantiation ───────────────
+    //
+    // The Mosaic CLI flattens its TOML `[[static]]` array entries
+    // and calls FromMap. Recognised keys:
+    //   prefix              required, e.g. "/assets"
+    //   dir                 required, filesystem path
+    //   cache_max_age       optional seconds (int as string)
+    public static Static FromMap(Map<string, string> cfg) {
+        var pfx: string = "/"
+        if (cfg.Has("prefix")) { pfx = cfg.Get("prefix") }
+        var dir: string = "."
+        if (cfg.Has("dir"))    { dir = cfg.Get("dir") }
+        let s = Static.New(pfx, dir)
+        if (cfg.Has("cache_max_age")) {
+            s.CacheMaxAge = String_ToInt(cfg.Get("cache_max_age"))
+        }
+        return s
+    }
+
+    // ── Internal helpers ────────────────────────────────────────────
+
+    private static string NormalizePrefix(string p) {
+        var s: string = p
+        if (String_Length(s) == 0) { return "/" }
+        if (String_CharAt1(s, 0) != "/") { s = "/" + s }
+        let n: int = String_Length(s)
+        if (n > 1 && String_CharAt1(s, n - 1) == "/") {
+            s = String_Substring(s, 0, n - 1)
+        }
+        return s
+    }
+
+    private static string NormalizeRoot(string d) {
+        if (String_Length(d) == 0) { return "." }
+        let n: int = String_Length(d)
+        // Strip trailing slash so the join in Serve always inserts
+        // exactly one separator (rel starts with "/").
+        if (n > 1 && String_CharAt1(d, n - 1) == "/") {
+            return String_Substring(d, 0, n - 1)
+        }
+        return d
+    }
+
+    // Map a leading-dot extension ("." + suffix) to a MIME type.
+    // Case-insensitive. Unknown extensions return
+    // "application/octet-stream" — never null, never empty —
+    // so the response always has a valid Content-Type.
+    //
+    // Coverage targets the assets a typical Mosaic app serves:
+    // HTML / CSS / JS / WASM / JSON / SVG / common image formats /
+    // common font formats / PDF / plain text / a few archive
+    // types. Excluded: media (audio/video) — those should
+    // probably go through a dedicated streaming path, not the
+    // generic static middleware that GC_MALLOCs the whole body.
+    public static string MimeByExtension(string ext) {
+        let e: string = String_ToLower(ext)
+        if (e == ".html" || e == ".htm")  { return "text/html; charset=utf-8" }
+        if (e == ".css")                   { return "text/css; charset=utf-8" }
+        if (e == ".js"   || e == ".mjs")   { return "application/javascript; charset=utf-8" }
+        if (e == ".json")                  { return "application/json" }
+        if (e == ".map")                   { return "application/json" }
+        if (e == ".xml")                   { return "application/xml" }
+        if (e == ".wasm")                  { return "application/wasm" }
+        if (e == ".txt"  || e == ".md")    { return "text/plain; charset=utf-8" }
+        if (e == ".csv")                   { return "text/csv; charset=utf-8" }
+        if (e == ".svg")                   { return "image/svg+xml" }
+        if (e == ".png")                   { return "image/png" }
+        if (e == ".jpg"  || e == ".jpeg")  { return "image/jpeg" }
+        if (e == ".gif")                   { return "image/gif" }
+        if (e == ".webp")                  { return "image/webp" }
+        if (e == ".avif")                  { return "image/avif" }
+        if (e == ".ico")                   { return "image/x-icon" }
+        if (e == ".bmp")                   { return "image/bmp" }
+        if (e == ".woff")                  { return "font/woff" }
+        if (e == ".woff2")                 { return "font/woff2" }
+        if (e == ".ttf")                   { return "font/ttf" }
+        if (e == ".otf")                   { return "font/otf" }
+        if (e == ".eot")                   { return "application/vnd.ms-fontobject" }
+        if (e == ".pdf")                   { return "application/pdf" }
+        if (e == ".zip")                   { return "application/zip" }
+        if (e == ".gz")                    { return "application/gzip" }
+        if (e == ".tar")                   { return "application/x-tar" }
+        if (e == ".webmanifest")           { return "application/manifest+json" }
+        if (e == ".atom")                  { return "application/atom+xml" }
+        if (e == ".rss")                   { return "application/rss+xml" }
+        if (e == ".yaml" || e == ".yml")   { return "application/yaml" }
+        if (e == ".toml")                  { return "application/toml" }
+        return "application/octet-stream"
+    }
+}

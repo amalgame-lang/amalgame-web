@@ -1,0 +1,252 @@
+// Unit tests for Static (v0.13.0).
+//
+// Verifies:
+//   - prefix normalization (leading/trailing slash handling)
+//   - Matches() boundary check ("/assets" matches "/assets/foo"
+//     but NOT "/assets-other")
+//   - Serve() returns null for non-matching paths
+//   - 405 Method Not Allowed for POST / PUT / DELETE
+//   - 403 Forbidden when path resolves to a directory
+//   - 403 Forbidden on path traversal attempts (../)
+//   - 404 Not Found for missing files
+//   - 200 OK with Content-Type / ETag / .File(path) for a hit
+//   - 304 Not Modified when If-None-Match matches
+//   - MIME table covers common extensions + falls back to
+//     application/octet-stream
+//   - FromMap composes prefix / dir / cache_max_age
+
+namespace Tests
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.IO
+import Amalgame.Net.Http
+import Amalgame.Web
+
+public class Program {
+
+    public static void Main(string[] args) {
+        Console.WriteLine("amalgame-web — Static tests")
+
+        // ── 0. Set up fixture files ──────────────────────────────
+        // Use a deterministic temp directory and write a fixture
+        // file we can stat predictably.
+        let fixDir: string = "/tmp/amalgame_static_test"
+        File_Delete(fixDir + "/hello.txt")  // best-effort cleanup
+        File_Delete(fixDir + "/empty.bin")
+        File_Delete(fixDir + "/nested/inner.txt")
+        // mkdir -p via the runtime helper. The intermediate write
+        // creates the path's directories — we use File_WriteAll
+        // which assumes dir exists, so the OS-level mkdir comes
+        // from Path_Combine usage in tooling. Cheat: call mkdir(3)
+        // via @c.
+        @c {
+            mkdir("/tmp/amalgame_static_test", 0755);
+            mkdir("/tmp/amalgame_static_test/nested", 0755);
+        }
+        File_WriteAll(fixDir + "/hello.txt", "Hello static world!")
+        File_WriteAll(fixDir + "/empty.bin", "")
+        File_WriteAll(fixDir + "/nested/inner.txt", "nested")
+
+        // ── 1. NormalizePrefix shape ─────────────────────────────
+        let s1 = Static.New("/assets", fixDir)
+        if (s1.Prefix == "/assets") {
+            Console.WriteLine("[PASS] prefix kept verbatim")
+        } else {
+            Console.WriteLine("[FAIL] prefix got: " + s1.Prefix)
+        }
+        let s2 = Static.New("assets/", fixDir)
+        if (s2.Prefix == "/assets") {
+            Console.WriteLine("[PASS] prefix adds leading slash + strips trailing")
+        } else {
+            Console.WriteLine("[FAIL] normalize got: " + s2.Prefix)
+        }
+        let s3 = Static.New("", fixDir)
+        if (s3.Prefix == "/") {
+            Console.WriteLine("[PASS] empty prefix → \"/\"")
+        } else {
+            Console.WriteLine("[FAIL] empty prefix got: " + s3.Prefix)
+        }
+
+        // ── 2. Matches() boundary check ──────────────────────────
+        let m = Static.New("/assets", fixDir)
+        if (m.Matches("/assets") && m.Matches("/assets/foo")
+            && m.Matches("/assets/nested/inner.txt")) {
+            Console.WriteLine("[PASS] Matches accepts prefix + subpaths")
+        } else {
+            Console.WriteLine("[FAIL] Matches rejected a valid path")
+        }
+        if (!m.Matches("/assets-other") && !m.Matches("/other") && !m.Matches("")) {
+            Console.WriteLine("[PASS] Matches rejects sibling prefixes")
+        } else {
+            Console.WriteLine("[FAIL] Matches accepted a sibling prefix")
+        }
+
+        // ── 3. Serve(null-match) returns null ────────────────────
+        let st = Static.New("/assets", fixDir)
+        let reqOther = new HttpRequest()
+        reqOther.Method = "GET"
+        reqOther.Path = "/api/users"
+        let rOther = st.Serve(reqOther)
+        if (rOther == null) {
+            Console.WriteLine("[PASS] Serve returns null for non-matching path")
+        } else {
+            Console.WriteLine("[FAIL] non-matching returned non-null")
+        }
+
+        // ── 4. Method gate (405 for POST) ────────────────────────
+        let reqPost = new HttpRequest()
+        reqPost.Method = "POST"
+        reqPost.Path = "/assets/hello.txt"
+        let rPost = st.Serve(reqPost)
+        if (rPost != null && rPost.StatusCode == 405) {
+            Console.WriteLine("[PASS] POST → 405 Method Not Allowed")
+        } else {
+            Console.WriteLine("[FAIL] POST got: " + String_FromInt(rPost.StatusCode))
+        }
+
+        // ── 5. 404 for missing file ──────────────────────────────
+        let reqMissing = new HttpRequest()
+        reqMissing.Method = "GET"
+        reqMissing.Path = "/assets/does-not-exist.png"
+        let rMissing = st.Serve(reqMissing)
+        if (rMissing != null && rMissing.StatusCode == 404) {
+            Console.WriteLine("[PASS] missing file → 404")
+        } else {
+            Console.WriteLine("[FAIL] missing got: " + String_FromInt(rMissing.StatusCode))
+        }
+
+        // ── 6. 403 for exact-prefix (would be dir listing) ───────
+        let reqDir = new HttpRequest()
+        reqDir.Method = "GET"
+        reqDir.Path = "/assets"
+        let rDir = st.Serve(reqDir)
+        if (rDir != null && rDir.StatusCode == 403) {
+            Console.WriteLine("[PASS] exact-prefix → 403 (no dir listing)")
+        } else {
+            Console.WriteLine("[FAIL] exact-prefix got: " + String_FromInt(rDir.StatusCode))
+        }
+
+        // ── 7. 403 for directory below mount ─────────────────────
+        let reqSubdir = new HttpRequest()
+        reqSubdir.Method = "GET"
+        reqSubdir.Path = "/assets/nested"
+        let rSubdir = st.Serve(reqSubdir)
+        if (rSubdir != null && rSubdir.StatusCode == 403) {
+            Console.WriteLine("[PASS] subdirectory → 403")
+        } else {
+            Console.WriteLine("[FAIL] subdir got: " + String_FromInt(rSubdir.StatusCode))
+        }
+
+        // ── 8. Path traversal blocked ────────────────────────────
+        let reqEsc = new HttpRequest()
+        reqEsc.Method = "GET"
+        reqEsc.Path = "/assets/../../etc/passwd"
+        let rEsc = st.Serve(reqEsc)
+        // After Path_Normalize, /tmp/amalgame_static_test/../../etc/passwd
+        // collapses to /etc/passwd which is NOT under the root prefix,
+        // so containment check fires → 403.
+        if (rEsc != null && rEsc.StatusCode == 403) {
+            Console.WriteLine("[PASS] ../ traversal → 403")
+        } else {
+            Console.WriteLine("[FAIL] traversal got: " + String_FromInt(rEsc.StatusCode))
+        }
+
+        // ── 9. 200 OK with Content-Type + ETag + FilePath ────────
+        let reqHit = new HttpRequest()
+        reqHit.Method = "GET"
+        reqHit.Path = "/assets/hello.txt"
+        let rHit = st.Serve(reqHit)
+        if (rHit != null && rHit.StatusCode == 200
+            && rHit.Headers.Get("Content-Type") == "text/plain; charset=utf-8"
+            && rHit.Headers.Has("ETag")
+            && rHit.FilePath != "") {
+            Console.WriteLine("[PASS] 200 with Content-Type + ETag + FilePath set")
+        } else {
+            Console.WriteLine("[FAIL] hit got: status=" + String_FromInt(rHit.StatusCode)
+                + " ct=" + rHit.Headers.Get("Content-Type"))
+        }
+
+        // ── 10. If-None-Match → 304 ──────────────────────────────
+        let etagFirst: string = rHit.Headers.Get("ETag")
+        let reqCond = new HttpRequest()
+        reqCond.Method = "GET"
+        reqCond.Path = "/assets/hello.txt"
+        reqCond.Headers.Set("if-none-match", etagFirst)
+        let rCond = st.Serve(reqCond)
+        if (rCond != null && rCond.StatusCode == 304
+            && rCond.Headers.Get("ETag") == etagFirst
+            && rCond.FilePath == "") {
+            Console.WriteLine("[PASS] If-None-Match → 304 with same ETag, no body")
+        } else {
+            Console.WriteLine("[FAIL] 304 got: status=" + String_FromInt(rCond.StatusCode))
+        }
+
+        // ── 11. ETag is stable across calls (size+mtime) ─────────
+        let rHit2 = st.Serve(reqHit)
+        if (rHit2.Headers.Get("ETag") == etagFirst) {
+            Console.WriteLine("[PASS] ETag stable across calls")
+        } else {
+            Console.WriteLine("[FAIL] ETag drifted: " + etagFirst + " vs " + rHit2.Headers.Get("ETag"))
+        }
+
+        // ── 12. Nested file resolves correctly ───────────────────
+        let reqNested = new HttpRequest()
+        reqNested.Method = "GET"
+        reqNested.Path = "/assets/nested/inner.txt"
+        let rNested = st.Serve(reqNested)
+        if (rNested != null && rNested.StatusCode == 200
+            && rNested.Headers.Get("Content-Type") == "text/plain; charset=utf-8") {
+            Console.WriteLine("[PASS] nested path resolves")
+        } else {
+            Console.WriteLine("[FAIL] nested got: " + String_FromInt(rNested.StatusCode))
+        }
+
+        // ── 13. MIME table — sample of common types ──────────────
+        if (Static.MimeByExtension(".html") == "text/html; charset=utf-8"
+            && Static.MimeByExtension(".PNG") == "image/png"
+            && Static.MimeByExtension(".css") == "text/css; charset=utf-8"
+            && Static.MimeByExtension(".js")  == "application/javascript; charset=utf-8"
+            && Static.MimeByExtension(".woff2") == "font/woff2") {
+            Console.WriteLine("[PASS] MIME table covers HTML/PNG/CSS/JS/WOFF2 (case-insensitive)")
+        } else {
+            Console.WriteLine("[FAIL] MIME lookup mismatch")
+        }
+        if (Static.MimeByExtension(".whatever") == "application/octet-stream"
+            && Static.MimeByExtension("") == "application/octet-stream") {
+            Console.WriteLine("[PASS] MIME fallback for unknown/empty")
+        } else {
+            Console.WriteLine("[FAIL] MIME fallback mismatch")
+        }
+
+        // ── 14. Cache-Control opt-in ─────────────────────────────
+        let withCache = Static.New("/assets", fixDir).WithCacheMaxAge(3600)
+        let rCached = withCache.Serve(reqHit)
+        if (rCached.Headers.Get("Cache-Control") == "public, max-age=3600") {
+            Console.WriteLine("[PASS] Cache-Control emitted when configured")
+        } else {
+            Console.WriteLine("[FAIL] cache header got: " + rCached.Headers.Get("Cache-Control"))
+        }
+
+        // ── 15. FromMap composes ─────────────────────────────────
+        let cfg = new Map<string, string>()
+        cfg.Set("prefix", "/files")
+        cfg.Set("dir", fixDir)
+        cfg.Set("cache_max_age", "60")
+        let fm = Static.FromMap(cfg)
+        if (fm.Prefix == "/files" && fm.Root == fixDir && fm.CacheMaxAge == 60) {
+            Console.WriteLine("[PASS] FromMap composes")
+        } else {
+            Console.WriteLine("[FAIL] FromMap got: prefix=" + fm.Prefix
+                + " root=" + fm.Root
+                + " maxage=" + String_FromInt(fm.CacheMaxAge))
+        }
+
+        // Cleanup
+        File_Delete(fixDir + "/hello.txt")
+        File_Delete(fixDir + "/empty.bin")
+        File_Delete(fixDir + "/nested/inner.txt")
+
+        Console.WriteLine("amalgame-web — Static tests done")
+    }
+}

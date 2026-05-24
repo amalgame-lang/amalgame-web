@@ -10,6 +10,7 @@
 #   - RateLimit (fixed-window per-key throttle — v0.6.0, uses amalgame-datetime)
 #   - Csrf (double-submit cookie CSRF guard — v0.7.0, uses amalgame-random)
 #   - WebApp (orchestrator chaining all middlewares — v0.8.0)
+#   - Static (file-serving middleware — v0.13.0)
 #
 # The BUILD TOOL (filesystem routing, Next.js App Router style,
 # DEV mode, scaffolding) is a separate project — install it once
@@ -26,17 +27,17 @@
 
 [package]
 name              = "amalgame-web"
-version           = "0.12.4"
+version           = "0.13.0"
 license           = "Apache-2.0"
 description       = "Mosaic — the Amalgame web framework runtime library."
-required-amalgame = ">=0.8.39"
+required-amalgame = ">=0.8.48"
 schema-version    = 1
 
 # Runtime deps on other Amalgame packages. amc >= 0.8.39 auto-pulls
 # these recursively on `amc package add web`.
 [dependencies]
 amalgame-tls                    = ">=0.3.1"
-amalgame-net-http               = ">=0.9.5"
+amalgame-net-http               = ">=0.9.6"
 amalgame-crypto                 = ">=0.3.0"
 amalgame-datetime               = ">=0.1.0"
 amalgame-random                 = ">=0.1.0"
@@ -68,6 +69,7 @@ classes   = [
     "RedisSessionStore",
     "AcmeConfig",
     "TlsBindingConfig",
+    "Static",
 ]
 header    = "runtime/Amalgame_Web.h"
 namespace = "Amalgame.Web"
@@ -88,6 +90,7 @@ sources   = [
     "redis_session.am",
     "acme_config.am",
     "tls_binding_config.am",
+    "static.am",
     "web_app.am",
 ]
 libs      = []
