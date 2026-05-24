@@ -5,12 +5,14 @@
 // SecurityHeaders → Cors response → Csrf cookie EVERY time they
 // write an accept loop. WebApp does it once, the right way.
 //
-// Pipeline order (fixed for v0.8.0 — custom ordering planned for v0.9):
+// Pipeline order (extended in v0.13.0 with static mounts):
 //
 //   request →
 //     1. RateLimit.Check         (429 if over limit)
 //     2. Cors.Preflight          (204 if OPTIONS preflight matches)
 //     3. Csrf.Validate           (403 if token missing/mismatched)
+//     3b. Static.Serve           (200/304/403/404 for any path
+//                                  matching a registered mount)
 //     4. Router.Match + handler  (404 if no route)
 //     5. Csrf.EnsureToken        (sets cookie on response if absent)
 //     6. SecurityHeaders.Apply   (stamps CSP / HSTS / etc.)
@@ -63,6 +65,12 @@ public class WebApp {
     public CsrfCfg:         Csrf              // null = no CSRF validation
     public Limiter:         RateLimit         // null = no rate limit
     public Logging:         LogConfig         // null = no access log
+    // v0.13.0: ordered list of Static mounts. Checked between
+    // CSRF validation and the router on every request — first
+    // mount whose prefix matches handles the response. Static
+    // bypasses CSRF response middlewares (no Set-Cookie for an
+    // asset) but still gets SecurityHeaders / CORS stamped on.
+    public StaticMounts:    List<Static>
     public State:           Map<string, string>  // app-level shared state
 
     // v0.9.4: mutex protecting State. WithState() can legitimately be
@@ -75,14 +83,15 @@ public class WebApp {
     public StateMu:         AmalgameMutex
 
     public WebApp() {
-        this.Routes  = new Router()
-        this.Headers = null
-        this.CorsCfg = null
-        this.CsrfCfg = null
-        this.Limiter = null
-        this.Logging = null
-        this.State   = new Map<string, string>()
-        this.StateMu = Threading.MutexNew()
+        this.Routes        = new Router()
+        this.Headers       = null
+        this.CorsCfg       = null
+        this.CsrfCfg       = null
+        this.Limiter       = null
+        this.Logging       = null
+        this.StaticMounts  = new List<Static>()
+        this.State         = new Map<string, string>()
+        this.StateMu       = Threading.MutexNew()
     }
 
     public static WebApp New() { return new WebApp() }
@@ -92,6 +101,14 @@ public class WebApp {
     public WebApp WithCors(Cors c)                         { this.CorsCfg = c;    return this }
     public WebApp WithCsrf(Csrf c)                         { this.CsrfCfg = c;    return this }
     public WebApp WithRateLimit(RateLimit rl)              { this.Limiter = rl;   return this }
+    // v0.13.0: register a static-file mount. Order matters —
+    // mounts are checked first-to-last on every request, so
+    // declare more-specific prefixes ("/assets/v2") before
+    // catchalls ("/"). A `/` mount becomes the SPA fallback.
+    public WebApp WithStatic(Static s) {
+        this.StaticMounts.Add(s)
+        return this
+    }
     // Apply level + file sink on the amalgame-logging facade
     // immediately so subsequent Log.Info/Warn/etc. honor them. The
     // LogConfig is also kept on the WebApp so Handle() can emit the
@@ -145,6 +162,20 @@ public class WebApp {
             let forbid: HttpResponse = this.CsrfCfg.Validate(req)
             if (forbid != null) {
                 return this.applyResponseMiddlewares(req, forbid)
+            }
+        }
+
+        // 3b. Static mounts. Before the router because the
+        // typical layout has "/" routes + "/assets/*" static,
+        // and the static path is cheaper to short-circuit than
+        // dragging every asset request through a no-match route
+        // scan. First mount whose prefix matches wins.
+        let sn: int = this.StaticMounts.Count()
+        for i in 0..sn {
+            let mount: Static = this.StaticMounts.Get(i)
+            let staticResp: HttpResponse = mount.Serve(req)
+            if (staticResp != null) {
+                return this.applyResponseMiddlewares(req, staticResp)
             }
         }
 

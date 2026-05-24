@@ -54,6 +54,13 @@ project. amalgame-web stays pure-library.
   Rails/Flask/Phoenix; zero ops for new apps. Signed-only in v0.1
   (data visible but tamper-proof) — AEAD encryption arrives with
   amalgame-crypto v0.2.
+- **Static** (v0.13.0) — file-serving middleware mounted at a URL
+  prefix. MIME by extension (~35 types), strong ETag from
+  `size-mtime`, `If-None-Match → 304`, path-traversal guard via
+  `Path_Normalize` + root containment, 403 for dir / 404 for missing.
+  Binary-safe wire-out via `HttpResponse.File(path)` → net-http's
+  v0.9.6 `H1Conn_RespondFile` (PNG / JPEG / PDF survive NUL bytes).
+  See [Static section](#static-v0130) below for usage.
 
 ## Roadmap
 
@@ -420,3 +427,83 @@ exempt_paths    = "/api/webhooks/, /healthz"
 Set `enabled = false` to get `Csrf.Disabled()` regardless of other
 keys — useful for tearing down validation in dev without removing
 the wiring.
+
+## Static (v0.13.0)
+
+Serve files from disk at a URL prefix — the Mosaic equivalent of
+nginx's `location /assets { root … }` or Apache's `Alias`.
+
+```amalgame
+let app = WebApp.New()
+    .WithStatic(Static.New("/assets", "./public").WithCacheMaxAge(3600))
+    .Get("/", ctx => HttpResponse.New().Html("<h1>Hi</h1>"))
+
+app.Serve(8080)
+```
+
+That's the 10-line example. Behind it:
+
+- **Prefix routing**: `GET /assets/logo.png` → `./public/logo.png`.
+  Boundary check means `/assets-other` does NOT match `/assets`.
+- **Path traversal blocked**: `/assets/../../etc/passwd` collapses
+  via `Path_Normalize` to `/etc/passwd`, which is no longer under
+  the `./public` root prefix → 403.
+- **Dir vs file**: serving the mount point itself or any
+  sub-directory yields 403 (no auto-index listing). Missing
+  files yield 404.
+- **Method gate**: only `GET` / `HEAD` reach the file; other
+  methods get 405.
+- **MIME**: inferred from extension — HTML, CSS, JS, WASM, JSON,
+  SVG / PNG / JPEG / GIF / WEBP / AVIF / ICO, WOFF / WOFF2 /
+  TTF / OTF, PDF, ZIP / GZ / TAR, YAML / TOML, …
+  Unknown → `application/octet-stream`. Case-insensitive.
+- **ETag**: strong, computed as `"size-mtime"` (both decimal,
+  quoted per RFC 7232). Browsers re-cache on it.
+- **Conditional GET**: `If-None-Match` match → `304 Not Modified`
+  with no body and the same `ETag` header.
+- **Binary-safe transport**: response uses
+  `HttpResponse.File(path)` → `H1Conn_RespondFile` (net-http
+  v0.9.6). PNG / JPEG / PDF / WASM with NUL bytes survive
+  intact.
+- **Cache-Control**: opt-in via `.WithCacheMaxAge(seconds)` →
+  emits `Cache-Control: public, max-age=N`.
+
+### Multiple mounts
+
+Order matters — checked first-to-last; first matching prefix
+wins. Declare more-specific mounts before catchalls:
+
+```amalgame
+let app = WebApp.New()
+    .WithStatic(Static.New("/assets/v2", "./public-v2"))   // pinned
+    .WithStatic(Static.New("/assets",    "./public"))      // current
+    .Get("/api/users", ctx => /* … */)
+```
+
+### Config-file driven
+
+`Static.FromMap(Map<string, string>)` for TOML-driven wiring:
+
+```toml
+[[static]]
+prefix         = "/assets"
+dir            = "./public"
+cache_max_age  = 3600
+```
+
+### What's NOT in v0.1
+
+- **`Range:` requests**. Today the whole file is sent. Adding
+  partial-content needs a runtime `H1Conn_RespondFileRange`
+  (deferred — see [`docs/proposals/beyond-http.md`](https://github.com/amalgame-lang/Amalgame/blob/main/docs/proposals/beyond-http.md)).
+- **`Last-Modified` / `If-Modified-Since`**. Skipped pending an
+  HTTP-date helper in `amalgame-datetime`. ETag covers the common
+  cache-revalidation path on its own.
+- **`sendfile(2)`** zero-copy. The runtime currently `GC_MALLOC`s
+  the bytes — fine for typical assets (<10 MB), wasteful for
+  large downloads.
+- **Pre-compressed variant selection** (serve `.css.gz` /
+  `.css.br` when the browser sends `Accept-Encoding`). Punt to v0.2.
+- **Auto-index listing** of directories. Intentional: Apache's
+  `Options +Indexes` has been a recurring source of accidental
+  data exposure. If you need it, register a route handler.
