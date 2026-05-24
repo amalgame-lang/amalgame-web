@@ -27,10 +27,10 @@
 
 [package]
 name              = "amalgame-web"
-version           = "0.13.0"
+version           = "0.13.1"
 license           = "Apache-2.0"
 description       = "Mosaic — the Amalgame web framework runtime library."
-required-amalgame = ">=0.8.48"
+required-amalgame = ">=0.8.50"
 schema-version    = 1
 
 # Runtime deps on other Amalgame packages. amc >= 0.8.39 auto-pulls

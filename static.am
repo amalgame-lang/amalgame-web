@@ -95,10 +95,23 @@ public class Static {
         return String_CharAt1(urlPath, pn) == "/"
     }
 
-    // Resolve the request to an HttpResponse. Returns null if the
-    // path doesn't match this mount (the caller should fall
-    // through to the router). Otherwise always returns an
-    // HttpResponse (200 / 304 / 403 / 404). Never throws.
+    // Resolve the request to an HttpResponse. Static is
+    // *additive*: returns null whenever it can't positively serve
+    // a file, so the caller falls through to the router. Mirrors
+    // Apache's mod_dir + nginx's try_files convention.
+    //
+    // Concretely returns:
+    //   - 200 / 304          file resolved + served
+    //   - 405                method not GET / HEAD
+    //   - 403                path-traversal escape (security
+    //                        boundary — never falls through)
+    //   - null               prefix doesn't match; exact-prefix
+    //                        request; subdirectory; missing file
+    //
+    // The 4 null cases all defer to the router. That lets users
+    // mount Static at "/" without it eating the router's index
+    // route (`app/index.am` → `GET /`), and lets sibling routes
+    // coexist with a public/ mount that happens to overlap.
     public HttpResponse Serve(HttpRequest req) {
         if (!this.Matches(req.Path)) { return null }
         // Only GET (and HEAD, future) maps to a static file. Other
@@ -116,10 +129,9 @@ public class Static {
             rel = String_Substring(req.Path, pn, String_Length(req.Path) - pn)
         }
         if (rel == "" || rel == "/") {
-            // Exact-prefix request — by convention a 403, not an
-            // index listing. Apps that want a homepage at /assets
-            // should register a route handler for it.
-            return HttpResponse.New().Status(403).Text("Forbidden")
+            // Exact-prefix — defer to router. The user has either
+            // a route at this path or genuinely meant a 404.
+            return null
         }
         let joined: string = this.Root + rel
         let normalized: string = Path_Normalize(joined)
@@ -128,25 +140,18 @@ public class Static {
         // traversal even after Path_Normalize collapses the
         // dots, because if `..` would have escaped the root, the
         // normalize step removes the trailing root segment too.
+        // This is a SECURITY boundary — return 403 explicitly (not
+        // null), so the router can't accidentally serve sensitive
+        // content via a sibling handler.
         let rootNorm: string = Path_Normalize(this.Root)
         let rn: int = String_Length(rootNorm)
         if (String_Length(normalized) < rn
             || String_Substring(normalized, 0, rn) != rootNorm) {
             return HttpResponse.New().Status(403).Text("Forbidden")
         }
-        // Refuse if the path resolves to a directory or is
-        // missing. File_IsFile catches both (returns false for
-        // dirs and for missing files); we use File_Exists +
-        // File_IsDir to distinguish the two for the right
-        // status code (403 vs 404).
-        if (!File_Exists(normalized)) {
-            return HttpResponse.New().Status(404).Text("Not Found")
-        }
-        if (File_IsDir(normalized)) {
-            return HttpResponse.New().Status(403).Text("Forbidden")
-        }
-        if (!File_IsFile(normalized)) {
-            return HttpResponse.New().Status(403).Text("Forbidden")
+        // Missing or non-file (dir / symlink / fifo): fall through.
+        if (!File_Exists(normalized) || !File_IsFile(normalized)) {
+            return null
         }
         // ETag = "size-mtime" decimal. Quoted per RFC 7232.
         let size: int = File_Size(normalized)
