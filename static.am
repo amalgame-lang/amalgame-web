@@ -122,12 +122,6 @@ public class Static {
     // coexist with a public/ mount that happens to overlap.
     public HttpResponse Serve(HttpRequest req) {
         if (!this.Matches(req.Path)) { return null }
-        // Only GET (and HEAD, future) maps to a static file. Other
-        // methods get 405 — never call the router for a path under
-        // a static mount with a wrong method.
-        if (req.Method != "GET" && req.Method != "HEAD") {
-            return HttpResponse.New().Status(405).Text("Method Not Allowed")
-        }
         // Strip the URL prefix; keep the remainder ("/" if
         // exact-prefix). Then compose with the filesystem root and
         // normalize lexically to collapse `..`.
@@ -170,6 +164,18 @@ public class Static {
         // Missing or non-file (dir / symlink / fifo): fall through.
         if (!File_Exists(normalized) || !File_IsFile(normalized)) {
             return null
+        }
+        // Method gate. Now that we've confirmed a real file is
+        // available at this URL, restrict to GET/HEAD. Other
+        // methods get a proper 405. We defer this check until
+        // *after* the file lookup so that POST/PUT/DELETE to URLs
+        // that simply don't have a static counterpart (a typical
+        // routed action like `POST /api/info`) fall through to
+        // the router instead of swallowing them with a spurious
+        // 405. Only when a real file exists does 405 become the
+        // honest answer.
+        if (req.Method != "GET" && req.Method != "HEAD") {
+            return HttpResponse.New().Status(405).Text("Method Not Allowed")
         }
         // ETag = "size-mtime" decimal. Quoted per RFC 7232.
         let size: int = File_Size(normalized)
