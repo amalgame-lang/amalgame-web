@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        amc-tag: [v0.8.39]
+        amc-tag: [v0.8.48]
     services:
       # v0.8.4+: redis_session_test exercises RedisSessionStore
       # against a live RESP2 server. The test SKIPs cleanly when no
@@ -45,7 +45,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: amalgame-lang/amalgame-net-http
-          ref: v0.9.5
+          ref: v0.9.6
           path: amalgame-net-http
 
       # v0.6.0+: RateLimit uses `DateTime.NowMonotonicNanos()` from
