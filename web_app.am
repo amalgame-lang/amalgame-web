@@ -189,6 +189,13 @@ public class WebApp {
         } else {
             let ctx = new WebContext()
             ctx.Params = m.Params
+            // v0.13.4: expose request body + method + path on the
+            // context so handlers can read PUT/POST/PATCH payloads
+            // (was previously only accessible by re-parsing the
+            // raw HttpRequest, which handlers didn't see).
+            ctx.Body   = req.Body
+            ctx.Method = req.Method
+            ctx.Path   = req.Path
             // Shallow-copy app state into ctx for read access.
             // Wrapped in StateMu — the lock-hold is short (a Keys()
             // call + N Get()s for typical app-config Maps with a

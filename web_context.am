@@ -20,12 +20,22 @@ public class WebContext {
     public State:     Map<string, string>     // app-level shared state (string-typed v0.1)
     public Session:   Session                 // null if no session
     public RequestId: string
+    // v0.13.4: raw request body (POST/PUT/PATCH). For GET/DELETE
+    // it's "". Populated by WebApp.Handle from HttpRequest.Body
+    // before the route handler runs. text-safe (binary uploads
+    // are a future surface — v0.14 will offer a Stream API).
+    public Body:      string
+    public Method:    string                  // "GET" / "POST" / ...
+    public Path:      string                  // "/users/42" — no query
 
     public WebContext() {
         this.Params    = new Map<string, string>()
         this.State     = new Map<string, string>()
         this.Session   = null
         this.RequestId = ""
+        this.Body      = ""
+        this.Method    = ""
+        this.Path      = ""
     }
 
     public string Param(string name) {
