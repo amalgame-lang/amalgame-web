@@ -27,6 +27,7 @@ public class WebContext {
     public Body:      string
     public Method:    string                  // "GET" / "POST" / ...
     public Path:      string                  // "/users/42" — no query
+    public Query:     Map<string, string>     // parsed query string
 
     public WebContext() {
         this.Params    = new Map<string, string>()
@@ -36,6 +37,12 @@ public class WebContext {
         this.Body      = ""
         this.Method    = ""
         this.Path      = ""
+        this.Query     = new Map<string, string>()
+    }
+
+    public string QueryParam(string name) {
+        if (this.Query.Has(name)) { return this.Query.Get(name) }
+        return ""
     }
 
     public string Param(string name) {
