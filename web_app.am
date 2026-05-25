@@ -196,6 +196,17 @@ public class WebApp {
             ctx.Body   = req.Body
             ctx.Method = req.Method
             ctx.Path   = req.Path
+            // Shallow-copy query params (already parsed by the
+            // HTTP layer). Handlers reach them via ctx.Query.Get()
+            // or the helper ctx.QueryParam("name").
+            if (req.Query != null) {
+                let qkeys: List<string> = req.Query.Keys()
+                let qn: int = qkeys.Count()
+                for qi in 0..qn {
+                    let qk: string = qkeys.Get(qi)
+                    ctx.Query.Set(qk, req.Query.Get(qk))
+                }
+            }
             // Shallow-copy app state into ctx for read access.
             // Wrapped in StateMu — the lock-hold is short (a Keys()
             // call + N Get()s for typical app-config Maps with a
