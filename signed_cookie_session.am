@@ -43,6 +43,7 @@ import Amalgame.Collections
 import Amalgame.String
 import Amalgame.Crypto
 import Amalgame.Random
+import Amalgame.Net.Http
 
 public class SignedCookieSessionStore {
     public Secret:         string       // HMAC key OR AES key seed

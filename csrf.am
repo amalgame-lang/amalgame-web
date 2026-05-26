@@ -11,6 +11,7 @@ namespace Amalgame.Web
 import Amalgame.Collections
 import Amalgame.String
 import Amalgame.Random
+import Amalgame.Net.Http
 
 // ─────────────────────────────────────────────────────────────────
 // Csrf — Cross-Site Request Forgery guard, double-submit cookie

@@ -7,6 +7,7 @@
 namespace Amalgame.Web
 
 import Amalgame.Collections
+import Amalgame.Net.Http
 
 // ─────────────────────────────────────────────────────────────────
 // WebContext — per-request "bag" of conveniences.
