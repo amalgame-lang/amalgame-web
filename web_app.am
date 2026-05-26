@@ -57,6 +57,8 @@ import Amalgame.Collections
 import Amalgame.String
 import Amalgame.Logging
 import Amalgame.Threading
+import Amalgame.Net.Http
+import Amalgame.Async
 
 public class WebApp {
     public Routes:          Router

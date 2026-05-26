@@ -39,6 +39,7 @@ import Amalgame.Collections
 import Amalgame.String
 import Amalgame.Database.NoSQL.Redis
 import Amalgame.Threading
+import Amalgame.Net.Http
 
 public class RedisSessionStore {
     public Host:           string
