@@ -50,6 +50,20 @@ namespace Amalgame.Web
 
 import Amalgame.Collections
 import Amalgame.String
+// v0.13.4-dev: explicit imports so amc's --lib precompile attaches
+// the corresponding packages and emits their #include lines in the
+// generated facade .c. Pre-fix, web_app.am / csrf.am / cors.am /
+// security_headers.am / static.am / rate_limit.am all used
+// `HttpRequest` / `HttpResponse` / `Http1` / `Cookie` types without
+// any source file declaring `import Amalgame.Net.Http`, so the BFS
+// in amc/main.am ScanImportsInto never grew requiredNs to include
+// `Amalgame.Net.Http`. Result: the precompiled libamalgame-pkg-Router.a
+// missed every WebApp / Static / Session symbol and consumer links
+// failed with `undefined reference to Amalgame_Web_WebApp_New` etc.
+// (mosaic-fs-demo + pollen-manager both hit this.)
+import Amalgame.Net.Http
+import Amalgame.Async
+import Amalgame.Tls
 
 // ─────────────────────────────────────────────────────────────────
 // Route — one registered route.

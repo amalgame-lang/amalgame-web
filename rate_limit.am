@@ -12,6 +12,7 @@ import Amalgame.String
 import Amalgame.DateTime
 import Amalgame.Database.NoSQL.Redis
 import Amalgame.Threading
+import Amalgame.Net.Http
 
 // v0.9.2: per-instance mutex protecting RateLimit.Store (memory
 // backend bucket Map) under Http1.ServeMt. Replaces v0.9.0
