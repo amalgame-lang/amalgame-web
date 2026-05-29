@@ -27,9 +27,9 @@
 
 [package]
 name              = "amalgame-web"
-version           = "0.13.3"
+version           = "0.14.0"
 license           = "Apache-2.0"
-description       = "Mosaic — the Amalgame web framework runtime library."
+description       = "Mosaic — the Amalgame web framework runtime library. v0.14 adds WebApp.ServeHttps / ServeHttpsMt for TLS-terminating HTTP/1.1 (no nginx/Caddy needed in front)."
 required-amalgame = ">=0.8.50"
 schema-version    = 1
 
@@ -37,7 +37,7 @@ schema-version    = 1
 # these recursively on `amc package add web`.
 [dependencies]
 amalgame-tls                    = ">=0.3.1"
-amalgame-net-http               = ">=0.9.6"
+amalgame-net-http               = ">=0.10.0"
 amalgame-crypto                 = ">=0.3.0"
 amalgame-datetime               = ">=0.1.0"
 amalgame-random                 = ">=0.1.0"
