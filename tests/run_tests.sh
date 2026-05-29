@@ -371,6 +371,8 @@ build_and_run() {
         --external "$CRYPTO_DIR/facade.am" \
         $WEB_EXTERNAL_FLAGS 2>&1 | tail -30
     gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$TLS_DIR/runtime" -I"$ASYNC_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$CRYPTO_DIR" -I"$REDIS_DIR/runtime" -I"$THREADING_DIR/runtime" -I"$RUNTIME_DIR" \
+        -include "$THREADING_DIR/runtime/Amalgame_Threading.h" \
+        -include "$REDIS_DIR/runtime/Amalgame_Database_Redis.h" \
         "$BUILD_DIR/$name.c" "$BUILD_DIR/facade.o" "$BUILD_DIR/nethttp.o" "$BUILD_DIR/datetime.o" "$BUILD_DIR/random.o" "$BUILD_DIR/logging.o" "$BUILD_DIR/crypto.o" \
         -lgc -lm -lz -lssl -lcrypto -lpthread -o "$BUILD_DIR/$name" 2>"$BUILD_DIR/gcc-last.log" || true
     head -10 "$BUILD_DIR/gcc-last.log"
