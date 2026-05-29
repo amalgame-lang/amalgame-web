@@ -27,9 +27,9 @@
 
 [package]
 name              = "amalgame-web"
-version           = "0.16.0"
+version           = "0.17.0"
 license           = "Apache-2.0"
-description       = "Mosaic — the Amalgame web framework runtime library. v0.16 adds JwtAuth middleware (HS256 verify, raw payload exposure for caller-side claim parsing)."
+description       = "Mosaic — the Amalgame web framework runtime library. v0.17 adds OAuth2Client (Authorization Code flow + GitHub/Google presets). Pairs with net-http v0.11+ HTTPS client."
 required-amalgame = ">=0.8.50"
 schema-version    = 1
 
@@ -37,7 +37,7 @@ schema-version    = 1
 # these recursively on `amc package add web`.
 [dependencies]
 amalgame-tls                    = ">=0.3.1"
-amalgame-net-http               = ">=0.10.0"
+amalgame-net-http               = ">=0.11.0"
 amalgame-crypto                 = ">=0.3.0"
 amalgame-datetime               = ">=0.1.0"
 amalgame-random                 = ">=0.1.0"
@@ -92,6 +92,7 @@ sources   = [
     "tls_binding_config.am",
     "basic_auth.am",
     "jwt_auth.am",
+    "oauth2.am",
     "static.am",
     "web_app.am",
 ]
