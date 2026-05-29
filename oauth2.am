@@ -1,0 +1,503 @@
+// amalgame-web — OAuth2Client (v0.17.0).
+//
+// OAuth 2.0 Authorization Code flow client. The two-call pattern:
+//
+//   // In /login handler:
+//   return oauth.StartLogin(req)        // 302 → provider + sets state cookie
+//
+//   // In /auth/callback handler:
+//   let r = oauth.HandleCallback(req)
+//   if (r.Ok) {
+//       // r.AccessToken — bearer token for further API calls
+//       // r.UserInfo   — raw JSON from userinfo endpoint
+//       // r.UserId / r.Email / r.Username — pre-extracted
+//   }
+//
+// Surface:
+//   - OAuth2Client.Github(id, secret, redirectUri) — preset, no scopes
+//   - OAuth2Client.Google(id, secret, redirectUri) — preset, openid+email
+//   - Custom: new OAuth2Client()
+//             .WithClientId(...) .WithClientSecret(...)
+//             .WithAuthorizeUrl(...) .WithTokenUrl(...)
+//             .WithUserInfoUrl(...) .WithRedirectUri(...)
+//             .WithScopes([...])
+//
+// What's NOT here (yet):
+//   - PKCE (Authorization Code with code_challenge / code_verifier).
+//     Recommended by RFC 9700 / OAuth 2.1 for all clients. The
+//     Github + Google presets use confidential-client flow with
+//     client_secret over TLS, which is still RFC-compliant but
+//     not the modern default. PKCE lands in v0.18.
+//   - id_token / OIDC. We hit the OAuth2 userinfo endpoint as a
+//     proxy for OIDC's UserInfo, which works for Github + Google
+//     but doesn't verify the id_token JWT signature. Full OIDC
+//     (RS256 + JWKS rotation) lands in v0.18.
+//   - State storage server-side. We store state in an HTTP-only
+//     cookie and compare to the query param on callback. Sufficient
+//     against generic CSRF; an attacker who can both inject a
+//     cookie and forge the callback could replay, but that's a
+//     much stronger attacker than the OAuth2 threat model.
+//
+// Production note: MUST run over TLS. The OAuth2 spec mandates
+// HTTPS for the redirect_uri; some providers (Github) refuse
+// http://* in non-localhost setups. WebApp.ServeHttps (v0.14+)
+// is the production-recommended pair.
+
+namespace Amalgame.Web
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.Net.Http
+import Amalgame.Crypto
+
+public class OAuth2Result {
+    public Ok:           bool
+    public Error:        string
+    public AccessToken:  string
+    public TokenType:    string         // usually "bearer"
+    public UserInfo:     string         // raw JSON body from userinfo endpoint
+    public UserId:       string         // provider-specific
+    public Email:        string
+    public Username:     string
+
+    public OAuth2Result() {
+        this.Ok          = false
+        this.Error       = ""
+        this.AccessToken = ""
+        this.TokenType   = ""
+        this.UserInfo    = ""
+        this.UserId      = ""
+        this.Email       = ""
+        this.Username    = ""
+    }
+}
+
+public class OAuth2Client {
+    public ClientId:     string
+    public ClientSecret: string
+    public AuthorizeUrl: string
+    public TokenUrl:     string
+    public UserInfoUrl:  string
+    public RedirectUri:  string
+    public Scopes:       List<string>
+    // Cookie name that carries the CSRF state between /login and
+    // /callback. Default "__oauth_state" — apps running multiple
+    // OAuth providers in parallel should override to disambiguate.
+    public StateCookie:  string
+    // Provider tag — drives which UserInfo fields we extract.
+    // "github" / "google" / "" (generic — no extraction beyond
+    // the raw body).
+    public Provider:     string
+
+    public OAuth2Client() {
+        this.ClientId     = ""
+        this.ClientSecret = ""
+        this.AuthorizeUrl = ""
+        this.TokenUrl     = ""
+        this.UserInfoUrl  = ""
+        this.RedirectUri  = ""
+        this.Scopes       = new List<string>()
+        this.StateCookie  = "__oauth_state"
+        this.Provider     = ""
+    }
+
+    // ── Presets ──────────────────────────────────────
+
+    // Github OAuth App. Create one at https://github.com/settings/
+    // applications/new — set Authorization callback URL to the
+    // exact `redirectUri` you pass here.
+    public static OAuth2Client Github(clientId: string, clientSecret: string, redirectUri: string) {
+        let c = new OAuth2Client()
+        c.ClientId     = clientId
+        c.ClientSecret = clientSecret
+        c.AuthorizeUrl = "https://github.com/login/oauth/authorize"
+        c.TokenUrl     = "https://github.com/login/oauth/access_token"
+        c.UserInfoUrl  = "https://api.github.com/user"
+        c.RedirectUri  = redirectUri
+        c.Provider     = "github"
+        return c
+    }
+
+    // Google Sign-In via OAuth2 (not OIDC — see file header).
+    // Create credentials at https://console.cloud.google.com/apis/credentials.
+    public static OAuth2Client Google(clientId: string, clientSecret: string, redirectUri: string) {
+        let c = new OAuth2Client()
+        c.ClientId     = clientId
+        c.ClientSecret = clientSecret
+        c.AuthorizeUrl = "https://accounts.google.com/o/oauth2/v2/auth"
+        c.TokenUrl     = "https://oauth2.googleapis.com/token"
+        c.UserInfoUrl  = "https://openidconnect.googleapis.com/v1/userinfo"
+        c.RedirectUri  = redirectUri
+        // Google requires explicit scopes — minimal set for id + email.
+        c.Scopes.Add("openid")
+        c.Scopes.Add("email")
+        c.Scopes.Add("profile")
+        c.Provider     = "google"
+        return c
+    }
+
+    // ── Builders ─────────────────────────────────────
+    public OAuth2Client WithClientId(s: string)     { this.ClientId     = s; return this }
+    public OAuth2Client WithClientSecret(s: string) { this.ClientSecret = s; return this }
+    public OAuth2Client WithAuthorizeUrl(s: string) { this.AuthorizeUrl = s; return this }
+    public OAuth2Client WithTokenUrl(s: string)     { this.TokenUrl     = s; return this }
+    public OAuth2Client WithUserInfoUrl(s: string)  { this.UserInfoUrl  = s; return this }
+    public OAuth2Client WithRedirectUri(s: string)  { this.RedirectUri  = s; return this }
+    public OAuth2Client WithScopes(xs: List<string>) { this.Scopes = xs; return this }
+    public OAuth2Client WithStateCookie(s: string)  { this.StateCookie  = s; return this }
+
+    // ── StartLogin ───────────────────────────────────
+
+    // Build the provider's authorize-URL redirect response. Sets a
+    // signed-via-randomness cookie carrying the state value so we
+    // can match it on callback. Sets SameSite=Lax + HttpOnly so
+    // the cookie survives the cross-origin redirect coming back
+    // from the provider.
+    public HttpResponse StartLogin(req: HttpRequest) {
+        let state: string = OAuth2Client.RandomState(32)
+        let scopeStr: string = OAuth2Client.JoinSpace(this.Scopes)
+        var url: string = this.AuthorizeUrl + "?response_type=code"
+        url = url + "&client_id="    + OAuth2Client.UrlEncode(this.ClientId)
+        url = url + "&redirect_uri=" + OAuth2Client.UrlEncode(this.RedirectUri)
+        url = url + "&state="        + OAuth2Client.UrlEncode(state)
+        if (String_Length(scopeStr) > 0) {
+            url = url + "&scope=" + OAuth2Client.UrlEncode(scopeStr)
+        }
+        // Cookie is short-lived (5 min) — enough for the user to
+        // complete the provider auth dance. Strict TTL caps replay.
+        let cookie: string = this.StateCookie + "=" + state +
+            "; Path=/; Max-Age=300; HttpOnly; SameSite=Lax; Secure"
+        return HttpResponse.New()
+            .Status(302)
+            .Header("Location", url)
+            .Header("Set-Cookie", cookie)
+            .Header("Cache-Control", "no-store")
+            .Text("")
+    }
+
+    // ── HandleCallback ───────────────────────────────
+
+    // Verify state, exchange code for an access_token, fetch
+    // userinfo. Returns OAuth2Result with extracted fields on
+    // success.
+    public OAuth2Result HandleCallback(req: HttpRequest) {
+        let r = new OAuth2Result()
+        if (req == null) { r.Error = "no request"; return r }
+
+        // 1. State verification — provider posts the same state
+        //    value we put in StartLogin's URL. Match it against
+        //    the cookie. Both must be present + equal.
+        let urlState: string = OAuth2Client.QueryValue(req.RawTarget(), "state")
+        let cookieState: string = OAuth2Client.CookieValue(
+            req.Header("cookie"), this.StateCookie)
+        if (String_Length(urlState) == 0 || String_Length(cookieState) == 0) {
+            r.Error = "missing state (CSRF check failed)"
+            return r
+        }
+        if (urlState != cookieState) {
+            r.Error = "state mismatch (CSRF check failed)"
+            return r
+        }
+
+        // 2. Code from the URL.
+        let code: string = OAuth2Client.QueryValue(req.RawTarget(), "code")
+        if (String_Length(code) == 0) {
+            // Some providers redirect with `?error=access_denied`
+            // instead of `?code=...` when the user declines.
+            let urlErr: string = OAuth2Client.QueryValue(req.RawTarget(), "error")
+            if (String_Length(urlErr) > 0) {
+                r.Error = "provider returned error: " + urlErr
+            } else {
+                r.Error = "no code in callback URL"
+            }
+            return r
+        }
+
+        // 3. Exchange the code for an access_token. POST to
+        //    /token with form-encoded body. Set Accept: json so
+        //    Github returns JSON (default is form-encoded).
+        let form: Map<string, string> = new Map<string, string>()
+        form.Set("grant_type",   "authorization_code")
+        form.Set("code",         code)
+        form.Set("redirect_uri", this.RedirectUri)
+        form.Set("client_id",    this.ClientId)
+        form.Set("client_secret", this.ClientSecret)
+
+        let tokenResp: HttpResponse = HttpClient.Request("POST", this.TokenUrl)
+            .Header("Accept",     "application/json")
+            .Header("User-Agent", "amalgame-web/0.17.0")
+            .BodyForm(form)
+            .Send()
+        if (tokenResp.StatusCode() < 200 || tokenResp.StatusCode() >= 300) {
+            r.Error = "token exchange failed: HTTP " + String_FromInt(tokenResp.StatusCode())
+            return r
+        }
+        let tokenJson: string = tokenResp.BodyText()
+        let accessToken: string = OAuth2Client.JsonStringField(tokenJson, "access_token")
+        if (String_Length(accessToken) == 0) {
+            r.Error = "no access_token in token response"
+            return r
+        }
+        r.AccessToken = accessToken
+        r.TokenType   = OAuth2Client.JsonStringField(tokenJson, "token_type")
+        if (String_Length(r.TokenType) == 0) { r.TokenType = "bearer" }
+
+        // 4. Fetch user info with the token. Both Github + Google
+        //    expect Authorization: Bearer.
+        if (String_Length(this.UserInfoUrl) > 0) {
+            let infoResp: HttpResponse = HttpClient.Request("GET", this.UserInfoUrl)
+                .Header("Authorization", "Bearer " + accessToken)
+                .Header("Accept",        "application/json")
+                .Header("User-Agent",    "amalgame-web/0.17.0")
+                .Send()
+            if (infoResp.StatusCode() >= 200 && infoResp.StatusCode() < 300) {
+                r.UserInfo = infoResp.BodyText()
+                this.ExtractKnownFields(r)
+            }
+        }
+
+        r.Ok = true
+        return r
+    }
+
+    // ── Field extraction (provider-aware) ────────────
+
+    private void ExtractKnownFields(r: OAuth2Result) {
+        if (this.Provider == "github") {
+            // Github /user response shape: { "id": 42, "login": "...", "email": "...", ... }
+            r.UserId   = String_FromInt(OAuth2Client.JsonNumberField(r.UserInfo, "id"))
+            r.Username = OAuth2Client.JsonStringField(r.UserInfo, "login")
+            r.Email    = OAuth2Client.JsonStringField(r.UserInfo, "email")
+            return
+        }
+        if (this.Provider == "google") {
+            // Google userinfo response: { "sub": "...", "email": "...", "name": "...", ... }
+            r.UserId   = OAuth2Client.JsonStringField(r.UserInfo, "sub")
+            r.Email    = OAuth2Client.JsonStringField(r.UserInfo, "email")
+            r.Username = OAuth2Client.JsonStringField(r.UserInfo, "name")
+            return
+        }
+        // Custom provider — caller parses r.UserInfo themselves.
+    }
+
+    // ── helpers (URL / cookie / minimal JSON scanner) ─
+
+    private static string RandomState(nBytes: int) {
+        var out: string = ""
+        @c {
+            unsigned char buf[64];
+            if (nBytes > 64) nBytes = 64;
+            if (nBytes <  8) nBytes =  8;
+            /* Fill from /dev/urandom — block-free, kernel-blessed. */
+            int fd = open("/dev/urandom", O_RDONLY);
+            ssize_t r = (fd >= 0) ? read(fd, buf, (size_t) nBytes) : -1;
+            if (fd >= 0) close(fd);
+            if (r != (ssize_t) nBytes) {
+                /* Fallback — rand() seeded by time(). Worse but
+                 * non-zero. State only needs to be unguessable
+                 * across the 5-minute window we keep the cookie. */
+                static int seeded = 0;
+                if (!seeded) { srand((unsigned) time(NULL) ^ (unsigned) getpid()); seeded = 1; }
+                for (int i = 0; i < nBytes; i++) buf[i] = (unsigned char) rand();
+            }
+            /* base64url encode without padding. */
+            static const char b64[] =
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+            char* enc = (char*) GC_MALLOC((nBytes * 4 / 3) + 4);
+            int oi = 0;
+            for (int i = 0; i < nBytes; i += 3) {
+                unsigned a = buf[i];
+                unsigned b = (i + 1 < nBytes) ? buf[i + 1] : 0;
+                unsigned c = (i + 2 < nBytes) ? buf[i + 2] : 0;
+                enc[oi++] = b64[(a >> 2) & 0x3F];
+                enc[oi++] = b64[((a << 4) | (b >> 4)) & 0x3F];
+                if (i + 1 < nBytes) enc[oi++] = b64[((b << 2) | (c >> 6)) & 0x3F];
+                if (i + 2 < nBytes) enc[oi++] = b64[c & 0x3F];
+            }
+            enc[oi] = 0;
+            out = enc;
+        }
+        return out
+    }
+
+    private static string UrlEncode(s: string) {
+        var out: string = ""
+        @c {
+            if (!s) s = "";
+            size_t len = strlen(s);
+            char* buf = (char*) GC_MALLOC(len * 3 + 1);
+            size_t oi = 0;
+            static const char hex[] = "0123456789ABCDEF";
+            for (size_t i = 0; i < len; i++) {
+                unsigned char ch = (unsigned char) s[i];
+                if ((ch >= 'A' && ch <= 'Z') ||
+                    (ch >= 'a' && ch <= 'z') ||
+                    (ch >= '0' && ch <= '9') ||
+                    ch == '-' || ch == '_' || ch == '.' || ch == '~') {
+                    buf[oi++] = (char) ch;
+                } else {
+                    buf[oi++] = '%';
+                    buf[oi++] = hex[(ch >> 4) & 0xF];
+                    buf[oi++] = hex[ch & 0xF];
+                }
+            }
+            buf[oi] = 0;
+            out = buf;
+        }
+        return out
+    }
+
+    private static string JoinSpace(xs: List<string>) {
+        var out: string = ""
+        let n: int = xs.Count()
+        for i in 0..n {
+            if (i > 0) { out = out + " " }
+            out = out + xs.Get(i)
+        }
+        return out
+    }
+
+    // Pull a query-string value out of a raw `/path?a=b&c=d` target.
+    private static string QueryValue(target: string, name: string) {
+        if (target == null) { return "" }
+        let qpos: int = String_IndexOf(target, "?")
+        if (qpos < 0) { return "" }
+        let qs: string = String_Substring(target, qpos + 1, String_Length(target) - qpos - 1)
+        let pairs: List<string> = String_Split(qs, "&")
+        let n: int = pairs.Count()
+        for i in 0..n {
+            let p: string = pairs.Get(i)
+            let eq: int = String_IndexOf(p, "=")
+            if (eq < 0) { continue }
+            let k: string = String_Substring(p, 0, eq)
+            if (k != name) { continue }
+            let v: string = String_Substring(p, eq + 1, String_Length(p) - eq - 1)
+            return OAuth2Client.UrlDecode(v)
+        }
+        return ""
+    }
+
+    // Pull a cookie value out of a `Cookie:` header line:
+    //   name=value; other=other; ...
+    private static string CookieValue(cookieHeader: string, name: string) {
+        if (cookieHeader == null) { return "" }
+        let pairs: List<string> = String_Split(cookieHeader, ";")
+        let n: int = pairs.Count()
+        for i in 0..n {
+            let p: string = String_Trim(pairs.Get(i))
+            let eq: int = String_IndexOf(p, "=")
+            if (eq < 0) { continue }
+            let k: string = String_Substring(p, 0, eq)
+            if (k != name) { continue }
+            return String_Substring(p, eq + 1, String_Length(p) - eq - 1)
+        }
+        return ""
+    }
+
+    private static string UrlDecode(s: string) {
+        var out: string = ""
+        @c {
+            if (!s) s = "";
+            size_t len = strlen(s);
+            char* buf = (char*) GC_MALLOC(len + 1);
+            size_t oi = 0;
+            for (size_t i = 0; i < len; i++) {
+                unsigned char ch = (unsigned char) s[i];
+                if (ch == '+') { buf[oi++] = ' '; continue; }
+                if (ch == '%' && i + 2 < len) {
+                    int hi = -1, lo = -1;
+                    char h = s[i + 1], l = s[i + 2];
+                    if (h >= '0' && h <= '9') hi = h - '0';
+                    else if (h >= 'a' && h <= 'f') hi = h - 'a' + 10;
+                    else if (h >= 'A' && h <= 'F') hi = h - 'A' + 10;
+                    if (l >= '0' && l <= '9') lo = l - '0';
+                    else if (l >= 'a' && l <= 'f') lo = l - 'a' + 10;
+                    else if (l >= 'A' && l <= 'F') lo = l - 'A' + 10;
+                    if (hi >= 0 && lo >= 0) {
+                        buf[oi++] = (char)((hi << 4) | lo);
+                        i += 2;
+                        continue;
+                    }
+                }
+                buf[oi++] = (char) ch;
+            }
+            buf[oi] = 0;
+            out = buf;
+        }
+        return out
+    }
+
+    // Top-level JSON string field extractor. Same approach as
+    // JwtAuth — tolerates whitespace + simple escapes. Returns ""
+    // when missing or malformed.
+    private static string JsonStringField(s: string, name: string) {
+        let needle: string = "\"" + name + "\""
+        let pos: int = String_IndexOf(s, needle)
+        if (pos < 0) { return "" }
+        var i: int = pos + String_Length(needle)
+        let n: int = String_Length(s)
+        while (i < n) {
+            let ch: string = String_Substring(s, i, 1)
+            if (ch == " " || ch == "\t" || ch == "\n" || ch == "\r" || ch == ":") {
+                i = i + 1; continue
+            }
+            if (ch == "\"") { i = i + 1; break }
+            return ""
+        }
+        var out: string = ""
+        var escaping: bool = false
+        while (i < n) {
+            let ch: string = String_Substring(s, i, 1)
+            if (escaping) {
+                if (ch == "n") { out = out + "\n" }
+                else if (ch == "t") { out = out + "\t" }
+                else if (ch == "r") { out = out + "\r" }
+                else { out = out + ch }
+                escaping = false
+                i = i + 1; continue
+            }
+            if (ch == "\\") { escaping = true; i = i + 1; continue }
+            if (ch == "\"") { return out }
+            out = out + ch
+            i = i + 1
+        }
+        return ""
+    }
+
+    private static int JsonNumberField(s: string, name: string) {
+        let needle: string = "\"" + name + "\""
+        let pos: int = String_IndexOf(s, needle)
+        if (pos < 0) { return 0 }
+        var i: int = pos + String_Length(needle)
+        let n: int = String_Length(s)
+        while (i < n) {
+            let ch: string = String_Substring(s, i, 1)
+            if (ch == " " || ch == "\t" || ch == "\n" || ch == "\r" || ch == ":") {
+                i = i + 1; continue
+            }
+            break
+        }
+        var sign: int = 1
+        if (i < n && String_Substring(s, i, 1) == "-") { sign = -1; i = i + 1 }
+        var v: int = 0
+        var any: bool = false
+        while (i < n) {
+            let ch: string = String_Substring(s, i, 1)
+            if (ch == "0") { v = v * 10 + 0 }
+            else if (ch == "1") { v = v * 10 + 1 }
+            else if (ch == "2") { v = v * 10 + 2 }
+            else if (ch == "3") { v = v * 10 + 3 }
+            else if (ch == "4") { v = v * 10 + 4 }
+            else if (ch == "5") { v = v * 10 + 5 }
+            else if (ch == "6") { v = v * 10 + 6 }
+            else if (ch == "7") { v = v * 10 + 7 }
+            else if (ch == "8") { v = v * 10 + 8 }
+            else if (ch == "9") { v = v * 10 + 9 }
+            else { break }
+            any = true
+            i = i + 1
+        }
+        if (!any) { return 0 }
+        return v * sign
+    }
+}
