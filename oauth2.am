@@ -232,7 +232,7 @@ public class OAuth2Client {
             r.Error = "token exchange failed: HTTP " + String_FromInt(tokenResp.StatusCode)
             return r
         }
-        let tokenJson: string = tokenResp.BodyText()
+        let tokenJson: string = tokenResp.BodyText
         let accessToken: string = OAuth2Client.JsonStringField(tokenJson, "access_token")
         if (String_Length(accessToken) == 0) {
             r.Error = "no access_token in token response"
@@ -251,7 +251,7 @@ public class OAuth2Client {
                 .Header("User-Agent",    "amalgame-web/0.17.0")
                 .Send()
             if (infoResp.StatusCode >= 200 && infoResp.StatusCode < 300) {
-                r.UserInfo = infoResp.BodyText()
+                r.UserInfo = infoResp.BodyText
                 this.ExtractKnownFields(r)
             }
         }
