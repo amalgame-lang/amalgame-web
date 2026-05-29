@@ -1,0 +1,314 @@
+// amalgame-web — JwtAuth middleware (v0.16.0).
+//
+// HS256 JWT verification for the typical
+//   Authorization: Bearer <eyJhbGciOiJIUzI1NiIs...>
+// pattern. Verifies the signature + the timing claims (`exp`, `nbf`),
+// then exposes the raw decoded payload JSON to the caller. The
+// caller parses claims themselves via Amalgame.Formats.Json (or any
+// JSON of their choosing) — JwtAuth does NOT depend on a JSON
+// package so this file stays self-contained and easy to fit into
+// downstream test/CI builds.
+//
+// Why no built-in claim parsing? Earlier prototypes pulled in
+// Amalgame.Formats.Json, but downstream tests that `--external`
+// this file couldn't resolve `Json` without explicitly importing
+// it themselves. The cleanest API split is: this middleware does
+// the crypto + framing; the app does the (one-line) Json.Parse.
+//
+// User code:
+//
+//   import Amalgame.Web
+//   import Amalgame.Formats.Json
+//
+//   let auth = new JwtAuth(Env_Get("JWT_SECRET"))
+//
+//   // 1. Gate the request:
+//   let denied = auth.Reject(req)
+//   if (denied != null) {
+//       TcpConn_Send(conn, denied.Render())
+//       continue
+//   }
+//
+//   // 2. Read claims from the verified payload:
+//   let payload: string = auth.Payload(req)   // raw JSON
+//   let claims: JsonValue = Json.Parse(payload).Value
+//   let userId: string = claims.Get("sub").AsString()
+//
+// Production note: MUST ship over TLS. Bearer tokens are equivalent
+// to passwords. v0.14.0's WebApp.ServeHttps is the production-
+// recommended pair. v0.16.0 — HS256 only. RS256 (per-issuer JWKS,
+// key rotation) lands in v0.17.
+
+namespace Amalgame.Web
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.Net.Http
+import Amalgame.Crypto
+
+public class JwtAuth {
+    public Secret: string
+
+    public JwtAuth(secret: string) {
+        this.Secret = secret
+    }
+
+    // Verify the request's Authorization: Bearer token. Returns the
+    // raw decoded JSON payload on success, "" otherwise. Most code
+    // calls Reject() first (which short-circuits on failure) and
+    // then Payload() here is safe to parse with abandon.
+    public string Payload(req: HttpRequest) {
+        if (req == null) { return "" }
+        let token: string = JwtAuth.ExtractBearer(req)
+        if (String_Length(token) == 0) { return "" }
+        let r: JwtVerifyResult = JwtAuth.VerifyToken(token, this.Secret)
+        if (!r.Ok) { return "" }
+        return r.Payload
+    }
+
+    // Returns a 401 response with WWW-Authenticate when the token
+    // is missing/expired/forged, null when the token verifies.
+    // Pattern:
+    //   let denied = auth.Reject(req)
+    //   if (denied != null) { send denied; continue }
+    public HttpResponse Reject(req: HttpRequest) {
+        if (req == null) { return JwtAuth.Unauthorized("no request") }
+        let token: string = JwtAuth.ExtractBearer(req)
+        if (String_Length(token) == 0) {
+            return JwtAuth.Unauthorized("missing or non-Bearer Authorization header")
+        }
+        let r: JwtVerifyResult = JwtAuth.VerifyToken(token, this.Secret)
+        if (!r.Ok) { return JwtAuth.Unauthorized(r.Error) }
+        return null
+    }
+
+    // ── Static API (token-only, no request plumbing) ───
+    //
+    // These let user code verify a token outside the middleware
+    // path (e.g. WebSocket upgrade handlers that read the token
+    // from a query string instead of the Authorization header).
+
+    public static JwtVerifyResult VerifyToken(token: string, secret: string) {
+        let r = new JwtVerifyResult()
+        if (token == null || String_Length(token) == 0) {
+            r.Error = "empty token"
+            return r
+        }
+        let parts: List<string> = String_Split(token, ".")
+        if (parts.Count() != 3) {
+            r.Error = "malformed token (expected 3 segments, got " +
+                String_FromInt(parts.Count()) + ")"
+            return r
+        }
+        let h64: string = parts.Get(0)
+        let p64: string = parts.Get(1)
+        let s64: string = parts.Get(2)
+
+        // Constant-time sig compare. A timing channel on bad sigs
+        // is the canonical JWT footgun — don't read claims if the
+        // sig didn't match, RFC 7519 §11.2.
+        let secBytes: List<int> = Bytes.FromString(secret)
+        let inBytes:  List<int> = Bytes.FromString(h64 + "." + p64)
+        let expected: List<int> = Hmac.Sha256(secBytes, inBytes)
+        let actual:   List<int> = Bytes.FromBase64Url(s64)
+        if (!JwtAuth.BytesEqualConstantTime(expected, actual)) {
+            r.Error = "bad signature"
+            return r
+        }
+
+        // Header — fish out "alg" with a tolerant string scanner.
+        // We accept only HS256 in this version.
+        let headerBytes: List<int> = Bytes.FromBase64Url(h64)
+        let headerStr:   string    = Bytes.ToString(headerBytes)
+        let alg: string = JwtAuth.ExtractJsonStringField(headerStr, "alg")
+        if (alg != "HS256") {
+            r.Error = "wrong alg (expected HS256, got '" + alg + "')"
+            return r
+        }
+
+        // Payload — decode + check timing claims via the same
+        // string scanner. The full JSON parse stays at the call
+        // site via the user's own Json import.
+        let payloadBytes: List<int> = Bytes.FromBase64Url(p64)
+        let payload:      string    = Bytes.ToString(payloadBytes)
+
+        let now: int = JwtAuth.UnixNow()
+        let exp: int = JwtAuth.ExtractJsonNumberField(payload, "exp")
+        if (exp > 0 && now >= exp) {
+            r.Error = "token expired"
+            return r
+        }
+        let nbf: int = JwtAuth.ExtractJsonNumberField(payload, "nbf")
+        if (nbf > 0 && now < nbf) {
+            r.Error = "token not yet valid"
+            return r
+        }
+
+        r.Ok      = true
+        r.Payload = payload
+        return r
+    }
+
+    // ── Helpers ─────────────────────────────────────────
+
+    private static string ExtractBearer(req: HttpRequest) {
+        let authHeader: string = req.Header("authorization")
+        if (String_Length(authHeader) == 0) { return "" }
+        let lower: string = String_ToLower(authHeader)
+        if (!String_StartsWith(lower, "bearer ")) { return "" }
+        return String_Substring(authHeader, 7, String_Length(authHeader) - 7)
+    }
+
+    private static HttpResponse Unauthorized(reason: string) {
+        // Escape any double quotes the reason may carry so the
+        // WWW-Authenticate header stays well-formed.
+        var safe: string = ""
+        let n: int = String_Length(reason)
+        for i in 0..n {
+            let ch: string = String_Substring(reason, i, 1)
+            if (ch == "\"") { safe = safe + "'" }
+            else if (ch == "\n" || ch == "\r") { safe = safe + " " }
+            else { safe = safe + ch }
+        }
+        return HttpResponse.New()
+            .Status(401)
+            .Header("WWW-Authenticate",
+                "Bearer realm=\"api\", error=\"invalid_token\", error_description=\"" + safe + "\"")
+            .Header("Content-Type", "application/json")
+            .Text("{\"error\":\"unauthorized\",\"reason\":\"" + safe + "\"}")
+    }
+
+    // Constant-time byte-list compare. Same length first, then
+    // OR the XOR of every position. Avoids leaking the expected
+    // signature via early exit.
+    private static bool BytesEqualConstantTime(a: List<int>, b: List<int>) {
+        let na: int = a.Count()
+        let nb: int = b.Count()
+        if (na != nb) { return false }
+        var diff: int = 0
+        for i in 0..na {
+            diff = diff | (a.Get(i) ^ b.Get(i))
+        }
+        return diff == 0
+    }
+
+    // Tolerant scanner: extract a top-level JSON string field by
+    // name. Returns "" when missing or malformed. JWT header /
+    // payload are flat objects with ASCII-clean keys, so we don't
+    // need a full parser here — we just locate `"<name>":` and
+    // grab the bytes between the next quote-pair, honouring `\"`
+    // escapes. Caller does a full Json.Parse for general claims.
+    private static string ExtractJsonStringField(s: string, name: string) {
+        let needle: string = "\"" + name + "\""
+        let pos: int = String_IndexOf(s, needle)
+        if (pos < 0) { return "" }
+        var i: int = pos + String_Length(needle)
+        let n: int = String_Length(s)
+        // Skip whitespace + ':' + whitespace.
+        while (i < n) {
+            let ch: string = String_Substring(s, i, 1)
+            if (ch == " " || ch == "\t" || ch == "\n" || ch == "\r" || ch == ":") {
+                i = i + 1
+                continue
+            }
+            if (ch == "\"") { i = i + 1; break }
+            return ""
+        }
+        // Walk to the closing quote, accumulating chars and
+        // honouring \" / \\ / \n / \t escapes.
+        var out: string = ""
+        var escaping: bool = false
+        while (i < n) {
+            let ch: string = String_Substring(s, i, 1)
+            if (escaping) {
+                if (ch == "n") { out = out + "\n" }
+                else if (ch == "t") { out = out + "\t" }
+                else if (ch == "r") { out = out + "\r" }
+                else { out = out + ch }
+                escaping = false
+                i = i + 1
+                continue
+            }
+            if (ch == "\\") {
+                escaping = true
+                i = i + 1
+                continue
+            }
+            if (ch == "\"") { return out }
+            out = out + ch
+            i = i + 1
+        }
+        return ""
+    }
+
+    // Tolerant scanner: extract a top-level JSON number field by
+    // name. Returns 0 when missing or non-numeric. Used for `exp`
+    // and `nbf` timing claims which are always integer-seconds in
+    // every reasonable issuer.
+    private static int ExtractJsonNumberField(s: string, name: string) {
+        let needle: string = "\"" + name + "\""
+        let pos: int = String_IndexOf(s, needle)
+        if (pos < 0) { return 0 }
+        var i: int = pos + String_Length(needle)
+        let n: int = String_Length(s)
+        while (i < n) {
+            let ch: string = String_Substring(s, i, 1)
+            if (ch == " " || ch == "\t" || ch == "\n" || ch == "\r" || ch == ":") {
+                i = i + 1
+                continue
+            }
+            break
+        }
+        // Read digits (with optional leading '-' for completeness,
+        // although exp/nbf are always positive).
+        var sign: int = 1
+        if (i < n && String_Substring(s, i, 1) == "-") {
+            sign = -1
+            i = i + 1
+        }
+        var v: int = 0
+        var any: bool = false
+        while (i < n) {
+            let ch: string = String_Substring(s, i, 1)
+            if (ch == "0") { v = v * 10 + 0 }
+            else if (ch == "1") { v = v * 10 + 1 }
+            else if (ch == "2") { v = v * 10 + 2 }
+            else if (ch == "3") { v = v * 10 + 3 }
+            else if (ch == "4") { v = v * 10 + 4 }
+            else if (ch == "5") { v = v * 10 + 5 }
+            else if (ch == "6") { v = v * 10 + 6 }
+            else if (ch == "7") { v = v * 10 + 7 }
+            else if (ch == "8") { v = v * 10 + 8 }
+            else if (ch == "9") { v = v * 10 + 9 }
+            else { break }
+            any = true
+            i = i + 1
+        }
+        if (!any) { return 0 }
+        return v * sign
+    }
+
+    private static int UnixNow() {
+        var out: int = 0
+        @c {
+            out = (i64) time(NULL);
+        }
+        return out
+    }
+}
+
+// ── JwtVerifyResult ───────────────────────────────────
+//
+// What VerifyToken returns. `Payload` carries the raw decoded JSON
+// payload as a string — the caller parses claims via their own Json.
+public class JwtVerifyResult {
+    public Ok:      bool
+    public Error:   string
+    public Payload: string
+
+    public JwtVerifyResult() {
+        this.Ok      = false
+        this.Error   = ""
+        this.Payload = ""
+    }
+}
