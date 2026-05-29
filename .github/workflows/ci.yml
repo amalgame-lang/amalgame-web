@@ -134,6 +134,7 @@ jobs:
         working-directory: web
         env:
           AMALGAME_NET_HTTP: ${{ github.workspace }}/amalgame-net-http
+          AMALGAME_TLS:      ${{ github.workspace }}/amalgame-tls
           AMALGAME_DATETIME: ${{ github.workspace }}/amalgame-datetime
           AMALGAME_RANDOM:   ${{ github.workspace }}/amalgame-random
           AMALGAME_LOGGING:  ${{ github.workspace }}/amalgame-logging
