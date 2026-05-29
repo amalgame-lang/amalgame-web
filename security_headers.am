@@ -8,6 +8,7 @@ namespace Amalgame.Web
 
 import Amalgame.Collections
 import Amalgame.String
+import Amalgame.Net.Http
 
 // ─────────────────────────────────────────────────────────────────
 // SecurityHeaders — response-side hardening (v0.4.0).
