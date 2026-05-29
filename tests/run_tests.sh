@@ -62,6 +62,23 @@ if [ -z "$NETHTTP_DIR" ] || [ ! -f "$NETHTTP_DIR/facade.am" ]; then
     exit 2
 fi
 
+# v0.17.0: amalgame-net-http v0.11+ #include's Amalgame_Tls.h for
+# the HttpClient HTTPS path. Same sibling-first lookup.
+TLS_DIR=""
+if [ -n "$AMALGAME_TLS" ] && [ -d "$AMALGAME_TLS" ]; then
+    TLS_DIR="$AMALGAME_TLS"
+elif [ -d "$PKG_DIR/../amalgame-tls" ]; then
+    TLS_DIR="$PKG_DIR/../amalgame-tls"
+elif compgen -G "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-tls/*/runtime" > /dev/null 2>&1; then
+    TLS_DIR="$(ls -d $HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-tls/*/ 2>/dev/null | head -1)"
+    TLS_DIR="${TLS_DIR%/}"
+fi
+if [ -z "$TLS_DIR" ] || [ ! -d "$TLS_DIR/runtime" ]; then
+    echo -e "${RED}error: amalgame-tls not found${NC}"
+    echo "  set AMALGAME_TLS=<path> or run \`amc package add tls\`"
+    exit 2
+fi
+
 # Locate amalgame-datetime (used by RateLimit since v0.6.0). Same
 # resolution order as net-http.
 DATETIME_DIR=""
@@ -291,25 +308,25 @@ EOF
 # v0.4.6 the user (or test runner) has to enumerate.
 NETHTTP_SOURCES="$NETHTTP_DIR/facade.am $NETHTTP_DIR/cookie.am $NETHTTP_DIR/http_request.am $NETHTTP_DIR/http_response.am $NETHTTP_DIR/http_parser.am $NETHTTP_DIR/http_server.am $NETHTTP_DIR/http_client.am"
 "$AMC" --lib -o "$BUILD_DIR/nethttp" $NETHTTP_SOURCES 2>&1 | tail -30
-gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$ASYNC_DIR/runtime" -I"$DATETIME_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/nethttp.c" -o "$BUILD_DIR/nethttp.o" 2>"$BUILD_DIR/gcc-last.log"; head -5 "$BUILD_DIR/gcc-last.log"
+gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$TLS_DIR/runtime" -I"$ASYNC_DIR/runtime" -I"$DATETIME_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/nethttp.c" -o "$BUILD_DIR/nethttp.o" 2>"$BUILD_DIR/gcc-last.log"; head -5 "$BUILD_DIR/gcc-last.log"
 [ -s "$BUILD_DIR/nethttp.o" ] || { echo -e "${RED}nethttp build failed${NC}"; exit 1; }
 "$AMC" --lib -o "$BUILD_DIR/datetime" "$DATETIME_DIR/facade.am" 2>&1 | tail -30
-gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$ASYNC_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/datetime.c" -o "$BUILD_DIR/datetime.o" 2>"$BUILD_DIR/gcc-last.log"; head -5 "$BUILD_DIR/gcc-last.log"
+gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$TLS_DIR/runtime" -I"$ASYNC_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/datetime.c" -o "$BUILD_DIR/datetime.o" 2>"$BUILD_DIR/gcc-last.log"; head -5 "$BUILD_DIR/gcc-last.log"
 [ -s "$BUILD_DIR/datetime.o" ] || { echo -e "${RED}datetime build failed${NC}"; exit 1; }
 "$AMC" --lib -o "$BUILD_DIR/random" "$RANDOM_DIR/facade.am" 2>&1 | tail -30
-gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$ASYNC_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/random.c" -o "$BUILD_DIR/random.o" 2>"$BUILD_DIR/gcc-last.log"; head -5 "$BUILD_DIR/gcc-last.log"
+gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$TLS_DIR/runtime" -I"$ASYNC_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/random.c" -o "$BUILD_DIR/random.o" 2>"$BUILD_DIR/gcc-last.log"; head -5 "$BUILD_DIR/gcc-last.log"
 [ -s "$BUILD_DIR/random.o" ] || { echo -e "${RED}random build failed${NC}"; exit 1; }
 "$AMC" --lib -o "$BUILD_DIR/logging" "$LOGGING_DIR/facade.am" 2>&1 | tail -30
-gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$ASYNC_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$CRYPTO_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/logging.c" -o "$BUILD_DIR/logging.o" 2>"$BUILD_DIR/gcc-last.log"; head -5 "$BUILD_DIR/gcc-last.log"
+gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$TLS_DIR/runtime" -I"$ASYNC_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$CRYPTO_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/logging.c" -o "$BUILD_DIR/logging.o" 2>"$BUILD_DIR/gcc-last.log"; head -5 "$BUILD_DIR/gcc-last.log"
 [ -s "$BUILD_DIR/logging.o" ] || { echo -e "${RED}logging build failed${NC}"; exit 1; }
 "$AMC" --lib -o "$BUILD_DIR/crypto" "$CRYPTO_DIR/facade.am" 2>&1 | tail -30
-gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$ASYNC_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$CRYPTO_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/crypto.c" -o "$BUILD_DIR/crypto.o" 2>"$BUILD_DIR/gcc-last.log"; head -5 "$BUILD_DIR/gcc-last.log"
+gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$TLS_DIR/runtime" -I"$ASYNC_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$CRYPTO_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/crypto.c" -o "$BUILD_DIR/crypto.o" 2>"$BUILD_DIR/gcc-last.log"; head -5 "$BUILD_DIR/gcc-last.log"
 [ -s "$BUILD_DIR/crypto.o" ] || { echo -e "${RED}crypto build failed${NC}"; exit 1; }
 # v0.7.x: amalgame-web is split across multiple .am files
 # (facade.am + sources from amalgame.toml). The compiler treats
 # them all as the same package; we just have to pass each one to
 # both the lib build and the test --external chain.
-WEB_SOURCES="facade.am session.am web_context.am security_headers.am cors.am rate_limit.am csrf.am log_config.am signed_cookie_session.am redis_session.am acme_config.am tls_binding_config.am basic_auth.am jwt_auth.am static.am web_app.am"
+WEB_SOURCES="facade.am session.am web_context.am security_headers.am cors.am rate_limit.am csrf.am log_config.am signed_cookie_session.am redis_session.am acme_config.am tls_binding_config.am basic_auth.am jwt_auth.am oauth2.am static.am web_app.am"
 WEB_EXTERNAL_FLAGS=""
 for src in $WEB_SOURCES; do
     WEB_EXTERNAL_FLAGS="$WEB_EXTERNAL_FLAGS --external $src"
@@ -334,7 +351,7 @@ NETHTTP_EXTERNAL_FLAGS=""
     --external "$RANDOM_DIR/facade.am" \
     --external "$LOGGING_DIR/facade.am" \
     --external "$CRYPTO_DIR/facade.am" 2>&1 | tail -30
-gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$ASYNC_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$CRYPTO_DIR" -I"$REDIS_DIR/runtime" -I"$RUNTIME_DIR" -c "$BUILD_DIR/facade.c" -o "$BUILD_DIR/facade.o" 2>"$BUILD_DIR/gcc-last.log"; head -5 "$BUILD_DIR/gcc-last.log"
+gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$TLS_DIR/runtime" -I"$ASYNC_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$CRYPTO_DIR" -I"$REDIS_DIR/runtime" -I"$RUNTIME_DIR" -c "$BUILD_DIR/facade.c" -o "$BUILD_DIR/facade.o" 2>"$BUILD_DIR/gcc-last.log"; head -5 "$BUILD_DIR/gcc-last.log"
 [ -s "$BUILD_DIR/facade.o" ] || { echo -e "${RED}facade build failed${NC}"; exit 1; }
 
 # Build + run one test file. --external order matters: net-http first
@@ -352,7 +369,7 @@ build_and_run() {
         --external "$LOGGING_DIR/facade.am" \
         --external "$CRYPTO_DIR/facade.am" \
         $WEB_EXTERNAL_FLAGS 2>&1 | tail -30
-    gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$ASYNC_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$CRYPTO_DIR" -I"$REDIS_DIR/runtime" -I"$RUNTIME_DIR" \
+    gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$TLS_DIR/runtime" -I"$ASYNC_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$CRYPTO_DIR" -I"$REDIS_DIR/runtime" -I"$RUNTIME_DIR" \
         "$BUILD_DIR/$name.c" "$BUILD_DIR/facade.o" "$BUILD_DIR/nethttp.o" "$BUILD_DIR/datetime.o" "$BUILD_DIR/random.o" "$BUILD_DIR/logging.o" "$BUILD_DIR/crypto.o" \
         -lgc -lm -lz -lssl -lcrypto -lpthread -o "$BUILD_DIR/$name" 2>"$BUILD_DIR/gcc-last.log"; head -5 "$BUILD_DIR/gcc-last.log"
     [ -x "$BUILD_DIR/$name" ] || { echo -e "${RED}${name} build failed${NC}"; exit 1; }
