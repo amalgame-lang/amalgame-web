@@ -187,7 +187,7 @@ public class OAuth2Client {
         // 1. State verification — provider posts the same state
         //    value we put in StartLogin's URL. Match it against
         //    the cookie. Both must be present + equal.
-        let urlState: string = OAuth2Client.QueryValue(req.RawTarget(), "state")
+        let urlState: string = OAuth2Client.QueryValue(req.RawTarget, "state")
         let cookieState: string = OAuth2Client.CookieValue(
             req.Header("cookie"), this.StateCookie)
         if (String_Length(urlState) == 0 || String_Length(cookieState) == 0) {
@@ -200,11 +200,11 @@ public class OAuth2Client {
         }
 
         // 2. Code from the URL.
-        let code: string = OAuth2Client.QueryValue(req.RawTarget(), "code")
+        let code: string = OAuth2Client.QueryValue(req.RawTarget, "code")
         if (String_Length(code) == 0) {
             // Some providers redirect with `?error=access_denied`
             // instead of `?code=...` when the user declines.
-            let urlErr: string = OAuth2Client.QueryValue(req.RawTarget(), "error")
+            let urlErr: string = OAuth2Client.QueryValue(req.RawTarget, "error")
             if (String_Length(urlErr) > 0) {
                 r.Error = "provider returned error: " + urlErr
             } else {
