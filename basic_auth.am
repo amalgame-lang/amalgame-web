@@ -1,0 +1,163 @@
+// amalgame-web — Basic Auth middleware (v0.15.0).
+//
+// RFC 7617 HTTP Basic Authentication. The simplest auth scheme on
+// the web: the client sends `Authorization: Basic base64(user:pass)`
+// over TLS, the server decodes + compares against a credential
+// store (static map, env vars, database, whatever).
+//
+// Lives next to Cors / SecurityHeaders / RateLimit as a middleware
+// the application wires manually into its dispatch loop. Library
+// stays opinion-free about WHERE credentials live — the caller
+// supplies a closure that maps `(user, password)` to `bool`.
+//
+// Example:
+//
+//   import Amalgame.Web
+//
+//   let auth = new BasicAuth("My Service")
+//       .WithVerifier((user, pwd) => {
+//           return user == "admin" && pwd == Env_Get("ADMIN_PASSWORD")
+//       })
+//
+//   // in dispatch (manual mode):
+//   let denied = auth.Reject(req)
+//   if (denied != null) {
+//       TcpConn_Send(conn, denied.Render())
+//       continue
+//   }
+//
+// Security:
+//   - MUST ship over TLS — Basic Auth puts the password on every
+//     request in (reversibly) base64-encoded form. amalgame-web's
+//     v0.14.0 ServeHttps is the production-recommended pair.
+//   - The realm string shows up in browser prompts. Plain ASCII
+//     only; no quotes / CTL chars (we escape with a simple replace).
+//   - Constant-time compare on the password isn't done here because
+//     the verifier callback is user-controlled — your callback
+//     should use a constant-time compare if you're matching against
+//     a static secret. For hashed passwords (bcrypt/argon2) the
+//     verifier's own compare is constant-time by construction.
+
+namespace Amalgame.Web
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.Net.Http
+import Amalgame.Crypto
+
+public class BasicAuth {
+    public Realm:    string
+    // Verifier closure: (user, pwd) → bool. null when not configured
+    // (Reject returns 401 unconditionally so apps fail closed).
+    public Verifier: Closure<string, string, bool>
+
+    public BasicAuth(realm: string) {
+        this.Realm    = realm
+        this.Verifier = null
+    }
+
+    public BasicAuth WithVerifier(v: Closure<string, string, bool>) {
+        this.Verifier = v
+        return this
+    }
+
+    // Returns a 401 response when the request fails Basic Auth,
+    // null when it passes. The 401 carries the spec-mandated
+    // `WWW-Authenticate: Basic realm="..."` header so browsers
+    // pop up their built-in credential prompt.
+    public HttpResponse Reject(req: HttpRequest) {
+        if (req == null) { return this.UnauthorizedResponse() }
+        let authHeader: string = req.GetHeader("authorization")
+        if (String_Length(authHeader) == 0) {
+            return this.UnauthorizedResponse()
+        }
+        let lower: string = String_ToLower(authHeader)
+        if (!String_StartsWith(lower, "basic ")) {
+            return this.UnauthorizedResponse()
+        }
+        let encoded: string = String_Substring(authHeader, 6, String_Length(authHeader) - 6)
+        // Decode standard base64 by converting to base64url first
+        // (replace +→-, /→_, strip = padding) — amalgame-crypto only
+        // exposes Bytes.FromBase64Url today. Base64 in Authorization
+        // headers is whitespace-trimmed first per RFC 7235.
+        let decoded: List<int> = BasicAuth.DecodeBase64Std(String_Trim(encoded))
+        let creds:   string    = Bytes.ToString(decoded)
+        let colon: int = String_IndexOf(creds, ":")
+        if (colon < 0) {
+            return this.UnauthorizedResponse()
+        }
+        let user: string = String_Substring(creds, 0, colon)
+        let pwd:  string = String_Substring(creds, colon + 1, String_Length(creds) - colon - 1)
+        if (this.Verifier == null) {
+            return this.UnauthorizedResponse()
+        }
+        let ok: bool = this.Verifier(user, pwd)
+        if (!ok) {
+            return this.UnauthorizedResponse()
+        }
+        return null
+    }
+
+    // RFC 4648 §4 → §5 conversion + decode. Replaces + with -, /
+    // with _, strips trailing = padding (which base64url normally
+    // omits), then dispatches to amalgame-crypto's FromBase64Url.
+    private static List<int> DecodeBase64Std(s: string) {
+        var out: string = ""
+        let n: int = String_Length(s)
+        for i in 0..n {
+            let ch: string = String_Substring(s, i, 1)
+            if (ch == "+") { out = out + "-" }
+            else if (ch == "/") { out = out + "_" }
+            else if (ch == "=") { continue }
+            else { out = out + ch }
+        }
+        return Bytes.FromBase64Url(out)
+    }
+
+    // Pull the authenticated user's identifier out of a request,
+    // or "" if the request isn't authenticated. Reads the header
+    // again (without re-running the verifier) — the assumption is
+    // that the dispatch loop has already called Reject() so any
+    // failed creds were short-circuited above this point.
+    public string User(req: HttpRequest) {
+        if (req == null) { return "" }
+        let authHeader: string = req.GetHeader("authorization")
+        if (String_Length(authHeader) == 0) { return "" }
+        let lower: string = String_ToLower(authHeader)
+        if (!String_StartsWith(lower, "basic ")) { return "" }
+        let encoded: string = String_Substring(authHeader, 6, String_Length(authHeader) - 6)
+        let decoded: List<int> = Bytes.FromBase64(String_Trim(encoded))
+        let creds:   string    = Bytes.ToString(decoded)
+        let colon: int = String_IndexOf(creds, ":")
+        if (colon < 0) { return "" }
+        return String_Substring(creds, 0, colon)
+    }
+
+    // ── private ─────────────────────────────────────────
+
+    private HttpResponse UnauthorizedResponse() {
+        let safeRealm: string = this.EscapeRealm(this.Realm)
+        return HttpResponse.New()
+            .Status(401)
+            .Header("WWW-Authenticate", "Basic realm=\"" + safeRealm + "\", charset=\"UTF-8\"")
+            .Header("Content-Type", "text/plain; charset=UTF-8")
+            .Text("Authentication required")
+    }
+
+    // Strip double quotes + backslashes + newlines from the realm
+    // string — the WWW-Authenticate header has very limited quoting
+    // and injection here lets an attacker forge prompts.
+    private string EscapeRealm(s: string) {
+        if (s == null) { return "" }
+        var out: string = ""
+        let n: int = String_Length(s)
+        for i in 0..n {
+            let ch: string = String_Substring(s, i, 1)
+            if (ch == "\"" || ch == "\\" || ch == "\n" || ch == "\r" || ch == "\t") {
+                continue
+            }
+            out = out + ch
+        }
+        return out
+    }
+}

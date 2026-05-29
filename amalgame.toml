@@ -27,9 +27,9 @@
 
 [package]
 name              = "amalgame-web"
-version           = "0.14.0"
+version           = "0.15.0"
 license           = "Apache-2.0"
-description       = "Mosaic — the Amalgame web framework runtime library. v0.14 adds WebApp.ServeHttps / ServeHttpsMt for TLS-terminating HTTP/1.1 (no nginx/Caddy needed in front)."
+description       = "Mosaic — the Amalgame web framework runtime library. v0.15 adds BasicAuth middleware (RFC 7617). JwtAuth coming in v0.16."
 required-amalgame = ">=0.8.50"
 schema-version    = 1
 
@@ -90,6 +90,7 @@ sources   = [
     "redis_session.am",
     "acme_config.am",
     "tls_binding_config.am",
+    "basic_auth.am",
     "static.am",
     "web_app.am",
 ]
