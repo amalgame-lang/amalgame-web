@@ -46,6 +46,24 @@ import Amalgame.String
 import Amalgame.Net.Http
 import Amalgame.Crypto
 
+// ── JwtVerifyResult ───────────────────────────────────
+//
+// What VerifyToken returns. `Payload` carries the raw decoded JSON
+// payload as a string — the caller parses claims via their own Json
+// import. Declared before JwtAuth so cgen sees the struct typedef
+// when JwtAuth's methods access its fields.
+public class JwtVerifyResult {
+    public Ok:      bool
+    public Error:   string
+    public Payload: string
+
+    public JwtVerifyResult() {
+        this.Ok      = false
+        this.Error   = ""
+        this.Payload = ""
+    }
+}
+
 public class JwtAuth {
     public Secret: string
 
@@ -297,18 +315,3 @@ public class JwtAuth {
     }
 }
 
-// ── JwtVerifyResult ───────────────────────────────────
-//
-// What VerifyToken returns. `Payload` carries the raw decoded JSON
-// payload as a string — the caller parses claims via their own Json.
-public class JwtVerifyResult {
-    public Ok:      bool
-    public Error:   string
-    public Payload: string
-
-    public JwtVerifyResult() {
-        this.Ok      = false
-        this.Error   = ""
-        this.Payload = ""
-    }
-}
