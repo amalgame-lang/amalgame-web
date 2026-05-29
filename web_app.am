@@ -309,6 +309,39 @@ public class WebApp {
         }
         return Http1.ServeMt(port, handler)
     }
+
+    //   ServeHttps(port, certPath, keyPath) — single-thread TLS-
+    //     terminating HTTP/1.1. Pairs with amalgame-net-http v0.10+
+    //     Https.H1Serve: same H1Conn handler shape as Serve(), but
+    //     the listener does TLS termination so deployments don't
+    //     need an nginx/Caddy reverse proxy doing TLS in front.
+    //     ALPN advertises "http/1.1"; browsers happily downgrade
+    //     from h2. The cert + key paths are forwarded verbatim to
+    //     OpenSSL (PEM expected, same as the older Https.Serve).
+    //
+    //   ServeHttpsMt(port, certPath, keyPath) — multi-thread variant.
+    //     Same caveats as ServeMt: handler must be thread-safe.
+    public int ServeHttps(int port, string certPath, string keyPath) {
+        let app = this
+        let handler = conn => {
+            let req: HttpRequest = HttpRequest.FromH1Conn(conn)
+            let resp: HttpResponse = app.Handle(req)
+            resp.WriteToH1Conn(conn)
+            return 0
+        }
+        return Https.H1Serve(port, certPath, keyPath, handler)
+    }
+    public int ServeHttpsMt(int port, string certPath, string keyPath) {
+        let app = this
+        let handler = conn => {
+            let req: HttpRequest = HttpRequest.FromH1Conn(conn)
+            let resp: HttpResponse = app.Handle(req)
+            resp.WriteToH1Conn(conn)
+            return 0
+        }
+        return Https.H1ServeMt(port, certPath, keyPath, handler)
+    }
+
     public int ServeWith(int port, cfg: AmalgameNetHttpServerConfig) {
         let app = this
         let handler = conn => {
