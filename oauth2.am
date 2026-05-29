@@ -228,8 +228,8 @@ public class OAuth2Client {
             .Header("User-Agent", "amalgame-web/0.17.0")
             .BodyForm(form)
             .Send()
-        if (tokenResp.StatusCode() < 200 || tokenResp.StatusCode() >= 300) {
-            r.Error = "token exchange failed: HTTP " + String_FromInt(tokenResp.StatusCode())
+        if (tokenResp.StatusCode < 200 || tokenResp.StatusCode >= 300) {
+            r.Error = "token exchange failed: HTTP " + String_FromInt(tokenResp.StatusCode)
             return r
         }
         let tokenJson: string = tokenResp.BodyText()
@@ -250,7 +250,7 @@ public class OAuth2Client {
                 .Header("Accept",        "application/json")
                 .Header("User-Agent",    "amalgame-web/0.17.0")
                 .Send()
-            if (infoResp.StatusCode() >= 200 && infoResp.StatusCode() < 300) {
+            if (infoResp.StatusCode >= 200 && infoResp.StatusCode < 300) {
                 r.UserInfo = infoResp.BodyText()
                 this.ExtractKnownFields(r)
             }
