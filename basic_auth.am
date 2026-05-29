@@ -67,7 +67,7 @@ public class BasicAuth {
     // pop up their built-in credential prompt.
     public HttpResponse Reject(req: HttpRequest) {
         if (req == null) { return this.UnauthorizedResponse() }
-        let authHeader: string = req.GetHeader("authorization")
+        let authHeader: string = req.Header("authorization")
         if (String_Length(authHeader) == 0) {
             return this.UnauthorizedResponse()
         }
@@ -121,7 +121,7 @@ public class BasicAuth {
     // failed creds were short-circuited above this point.
     public string User(req: HttpRequest) {
         if (req == null) { return "" }
-        let authHeader: string = req.GetHeader("authorization")
+        let authHeader: string = req.Header("authorization")
         if (String_Length(authHeader) == 0) { return "" }
         let lower: string = String_ToLower(authHeader)
         if (!String_StartsWith(lower, "basic ")) { return "" }
