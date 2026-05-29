@@ -126,7 +126,7 @@ public class BasicAuth {
         let lower: string = String_ToLower(authHeader)
         if (!String_StartsWith(lower, "basic ")) { return "" }
         let encoded: string = String_Substring(authHeader, 6, String_Length(authHeader) - 6)
-        let decoded: List<int> = Bytes.FromBase64(String_Trim(encoded))
+        let decoded: List<int> = BasicAuth.DecodeBase64Std(String_Trim(encoded))
         let creds:   string    = Bytes.ToString(decoded)
         let colon: int = String_IndexOf(creds, ":")
         if (colon < 0) { return "" }
