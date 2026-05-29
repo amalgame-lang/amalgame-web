@@ -30,7 +30,7 @@ name              = "amalgame-web"
 version           = "0.17.0"
 license           = "Apache-2.0"
 description       = "Mosaic — the Amalgame web framework runtime library. v0.17 adds OAuth2Client (Authorization Code flow + GitHub/Google presets). Pairs with net-http v0.11+ HTTPS client."
-required-amalgame = ">=0.8.50"
+required-amalgame = ">=0.8.58"
 schema-version    = 1
 
 # Runtime deps on other Amalgame packages. amc >= 0.8.39 auto-pulls
