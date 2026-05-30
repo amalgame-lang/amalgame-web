@@ -138,8 +138,10 @@ public class Program {
 
 ## Server entry points
 
-`WebApp` exposes five drop-in serve methods (since v0.12.0); pick
-by deployment model:
+`WebApp` exposes seven drop-in serve methods; pick by deployment
+model. The first five speak plain HTTP/1.1; the last two terminate
+TLS in-process (HTTPS, ALPN `http/1.1`) via the cert/key pair you
+provide.
 
 | Method | Concurrency | Best for | Platform |
 |---|---|---|---|
@@ -147,7 +149,16 @@ by deployment model:
 | `app.ServeMt(port)` | 1 thread per conn (~8 MB lazy stack) | CPU-bound handlers | all |
 | `app.ServeWith(port, cfg)` | serial + `HttpServerConfig` knobs | keep-alive + size limits | all |
 | `app.ServeMtWith(port, cfg)` | multi-thread + config | the previous default for prod | all |
-| **`app.ServeAsync(port)`** (v0.12.0) | **1 thread, N fibers (~64 KB / conn)** | **I/O-bound handlers** | **Linux only (epoll)** |
+| `app.ServeAsync(port)` (v0.12.0) | 1 thread, N fibers (~64 KB / conn) | I/O-bound handlers | Linux only (epoll) |
+| **`app.ServeHttps(port, certPath, keyPath)`** (v0.14.0) | **serial, in-process TLS termination** | **HTTPS dev / single-user** | **all (OpenSSL)** |
+| **`app.ServeHttpsMt(port, certPath, keyPath)`** (v0.14.0) | **1 thread per conn + TLS** | **HTTPS prod (no reverse proxy needed)** | **all (OpenSSL)** |
+
+Pair `ServeHttps*` with [`amalgame-tls`](https://github.com/amalgame-lang/amalgame-tls)
+to issue + auto-renew the cert in-process — `AcmeNative.EnsureCert(domain, email, dir, "")`
+provisions a Let's Encrypt cert at startup, `AcmeNative.AutoRenewTimer`
+spawns a background thread that re-issues when the cert hits
+the configured threshold (default 30 days). See the `amalgame-live`
+demo for a complete pattern.
 
 ### When to pick `ServeAsync`
 
