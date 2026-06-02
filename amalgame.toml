@@ -27,7 +27,7 @@
 
 [package]
 name              = "amalgame-web"
-version           = "0.17.1"
+version           = "0.17.2"
 license           = "Apache-2.0"
 description       = "Mosaic — the Amalgame web framework runtime library. v0.17.1 requires net-http v0.11.1+ so SetCookie / Cors / SecurityHeaders / CSRF / RateLimit / OAuth2 cookies finally make the wire (every Header(...) was previously dropped by WriteToH1Conn — fixed upstream)."
 required-amalgame = ">=0.8.58"
