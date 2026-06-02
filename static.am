@@ -271,6 +271,10 @@ public class Static {
         if (e == ".xml")                   { return "application/xml" }
         if (e == ".wasm")                  { return "application/wasm" }
         if (e == ".txt"  || e == ".md")    { return "text/plain; charset=utf-8" }
+        // Scripts d'install servis pour `curl … | sh` : text/plain pour que
+        // l'utilisateur prudent puisse les inspecter dans le navigateur
+        // (octet-stream forcerait un téléchargement).
+        if (e == ".sh")                    { return "text/plain; charset=utf-8" }
         if (e == ".csv")                   { return "text/csv; charset=utf-8" }
         if (e == ".svg")                   { return "image/svg+xml" }
         if (e == ".png")                   { return "image/png" }
