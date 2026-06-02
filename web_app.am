@@ -59,6 +59,7 @@ import Amalgame.Logging
 import Amalgame.Threading
 import Amalgame.Net.Http
 import Amalgame.Async
+import Amalgame.DateTime    // monotonic clock for access-log request timing
 
 public class WebApp {
     public Routes:          Router
@@ -141,7 +142,40 @@ public class WebApp {
     // HttpResponse. Never throws — every failure mode produces a
     // proper HttpResponse so the caller can blindly `.Render()` and
     // ship it.
+    // Run the full pipeline on `req` and return the final response.
+    // When access logging is on, emits exactly one INFO line per
+    // request — on EVERY path (static hit, middleware reject, route,
+    // 404), not just routed handlers — by wrapping the whole dispatch
+    // and timing it on the monotonic clock.
     public HttpResponse Handle(HttpRequest req) {
+        if (this.Logging == null || !this.Logging.AccessLog) {
+            return this.dispatch(req)
+        }
+        let t0: int = DateTime.NowMonotonicNanos()
+        let final: HttpResponse = this.dispatch(req)
+        this.logAccess(req, final, t0)
+        return final
+    }
+
+    // One access-log line: "METHOD host path -> status Nms ip:port".
+    // host comes from the Host header (lower-cased key), ip from the
+    // connection's RemoteAddr, duration from the monotonic clock.
+    // Falls back to "-" when a field is absent.
+    private void logAccess(HttpRequest req, HttpResponse final, int t0) {
+        var host: string = "-"
+        if (req.Headers != null && req.Headers.Has("host")) {
+            host = req.Headers.Get("host")
+        }
+        var ip: string = req.RemoteAddr
+        if (String_Length(ip) == 0) { ip = "-" }
+        let dtNs: int = DateTime.NowMonotonicNanos() - t0
+        let dtMs: int = dtNs / 1000000
+        Log.Info(req.Method + " " + host + " " + req.Path + " -> "
+                 + String_FromInt(final.StatusCode) + " "
+                 + String_FromInt(dtMs) + "ms " + ip)
+    }
+
+    private HttpResponse dispatch(HttpRequest req) {
         // 1. RateLimit. Cheapest reject — go first.
         if (this.Limiter != null) {
             let limited: HttpResponse = this.Limiter.Check(req)
@@ -225,15 +259,7 @@ public class WebApp {
             resp = m.Route.Handler(ctx)
         }
 
-        let final: HttpResponse = this.applyResponseMiddlewares(req, resp)
-
-        // Access log (v0.8.2). One-liner per request at INFO level.
-        // Format: "METHOD path -> status". Future v0.x.y will switch
-        // to JSON when amalgame-logging exposes a JSON sink.
-        if (this.Logging != null && this.Logging.AccessLog) {
-            Log.Info(req.Method + " " + req.Path + " -> " + String_FromInt(final.StatusCode))
-        }
-        return final
+        return this.applyResponseMiddlewares(req, resp)
     }
 
     // ── Internal: response-side middleware chain ─────
