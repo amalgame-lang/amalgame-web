@@ -1,0 +1,92 @@
+// amalgame-web — PoweredBy (server-identity advertisement).
+//
+// Shipped v0.21.0. Stamps two identity headers onto every response,
+// ON BY DEFAULT, so a bare `WebApp.New()` already announces the stack:
+//
+//   X-Powered-By: Mosaic (Amalgame)    (framework convention — Express-style)
+//   Server:       Mosaic (Amalgame)    (server convention — nginx/apache-style)
+//
+// Rationale: free, passive advertisement for the Amalgame stack — every
+// Mosaic site in the wild becomes a billboard. The flip side is that
+// `X-Powered-By` is mild fingerprinting (OWASP/helmet recommend dropping
+// it), so this is fully toggleable: `WebApp.WithoutPoweredBy()` or the
+// `[powered_by] enabled = false` config table turns it off cleanly, and
+// individual headers / the advertised value can be customized.
+//
+// Like SecurityHeaders, Apply NEVER overwrites a header the handler
+// already set — a handler that sets its own `Server:` wins.
+
+namespace Amalgame.Web
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.Net.Http
+
+// ─────────────────────────────────────────────────────────────────
+// PoweredBy — server-identity headers (v0.21.0).
+// ─────────────────────────────────────────────────────────────────
+public class PoweredBy {
+    public Enabled:        bool    // master switch
+    public Value:          string  // advertised identity, e.g. "Mosaic (Amalgame)"
+    public EmitXPoweredBy: bool    // emit "X-Powered-By: <Value>"
+    public EmitServer:     bool    // emit "Server: <Value>"
+
+    public PoweredBy() {
+        this.Enabled        = true
+        this.Value          = "Mosaic (Amalgame)"
+        this.EmitXPoweredBy = true
+        this.EmitServer     = true
+    }
+
+    // Default Mosaic identity — both headers, enabled. This is what
+    // WebApp wires in automatically, so it's documentation more than
+    // a necessary call.
+    public static PoweredBy Default() {
+        return new PoweredBy()
+    }
+
+    // A disabled instance — emits nothing. Equivalent to
+    // WebApp.WithoutPoweredBy().
+    public static PoweredBy Disabled() {
+        let p = new PoweredBy()
+        p.Enabled = false
+        return p
+    }
+
+    public PoweredBy WithValue(string v)        { this.Value = v;          return this }
+    public PoweredBy WithXPoweredBy(bool on)    { this.EmitXPoweredBy = on; return this }
+    public PoweredBy WithServer(bool on)        { this.EmitServer = on;     return this }
+    public PoweredBy Enable()                   { this.Enabled = true;      return this }
+    public PoweredBy Disable()                  { this.Enabled = false;     return this }
+
+    // Build from a flat key/value map (Mosaic flattens its TOML
+    // `[powered_by]` table to this shape). Recognised keys (all
+    // optional):
+    //   enabled        "true" | "false"   — master switch
+    //   value          advertised identity string
+    //   x_powered_by   "true" | "false"   — toggle the X-Powered-By header
+    //   server         "true" | "false"   — toggle the Server header
+    // Unknown keys are ignored (forward-compat).
+    public static PoweredBy FromMap(Map<string, string> cfg) {
+        let p = new PoweredBy()
+        if (cfg.Has("enabled"))      { p.Enabled        = (cfg.Get("enabled") == "true") }
+        if (cfg.Has("value"))        { p.Value          = cfg.Get("value") }
+        if (cfg.Has("x_powered_by")) { p.EmitXPoweredBy = (cfg.Get("x_powered_by") == "true") }
+        if (cfg.Has("server"))       { p.EmitServer     = (cfg.Get("server") == "true") }
+        return p
+    }
+
+    // Stamp the configured identity headers onto `resp`. No-op when
+    // disabled; skips a header the handler already set (handler wins).
+    // Returns `resp` for chaining.
+    public HttpResponse Apply(HttpResponse resp) {
+        if (!this.Enabled) { return resp }
+        if (this.EmitXPoweredBy && !resp.Headers.Has("X-Powered-By")) {
+            resp.Header("X-Powered-By", this.Value)
+        }
+        if (this.EmitServer && !resp.Headers.Has("Server")) {
+            resp.Header("Server", this.Value)
+        }
+        return resp
+    }
+}
