@@ -1,0 +1,114 @@
+// Unit tests for OAuth2Client (v0.17.0+).
+//
+// Network-free surface only: the preset/builder wiring, StartLogin's
+// redirect + state-cookie binding, and HandleCallback's CSRF early
+// returns (which fire before any token-exchange HTTP call). The
+// token-exchange + userinfo paths need a live provider and are
+// exercised manually / in integration, not here.
+
+namespace Tests
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.Net.Http
+import Amalgame.Web
+
+public class Program {
+    public static void Main(string[] args) {
+        Console.WriteLine("amalgame-web — OAuth2 tests")
+
+        // ── 1. Github preset wires the documented endpoints ──────
+        let gh = OAuth2Client.Github("cid", "csecret", "https://app.example.com/cb")
+        if (gh.AuthorizeUrl == "https://github.com/login/oauth/authorize"
+            && gh.TokenUrl == "https://github.com/login/oauth/access_token"
+            && gh.UserInfoUrl == "https://api.github.com/user"
+            && gh.Provider == "github") {
+            Console.WriteLine("[PASS] Github preset wires authorize/token/userinfo + provider")
+        } else {
+            Console.WriteLine("[FAIL] Github preset endpoints")
+        }
+
+        // ── 2. Google preset carries the minimal scopes ──────────
+        let goog = OAuth2Client.Google("gid", "gsecret", "https://app.example.com/cb")
+        if (goog.Provider == "google" && goog.Scopes.Count() == 3) {
+            Console.WriteLine("[PASS] Google preset sets provider + 3 scopes")
+        } else {
+            Console.WriteLine("[FAIL] Google preset scopes: " + String_FromInt(goog.Scopes.Count()))
+        }
+
+        // ── 3. Custom builder chain sets fields ──────────────────
+        let c = new OAuth2Client()
+            .WithClientId("myid")
+            .WithClientSecret("mysecret")
+            .WithAuthorizeUrl("https://idp.example.com/authorize")
+            .WithRedirectUri("https://app.example.com/cb")
+        if (c.ClientId == "myid" && c.ClientSecret == "mysecret"
+            && c.AuthorizeUrl == "https://idp.example.com/authorize") {
+            Console.WriteLine("[PASS] custom builder chain composes")
+        } else {
+            Console.WriteLine("[FAIL] builder chain")
+        }
+
+        // ── 4. StartLogin → 302 with the right params + state cookie ─
+        let req = new HttpRequest()
+        let resp: HttpResponse = gh.StartLogin(req)
+        let loc: string    = resp.Headers.Get("Location")
+        let cookie: string = resp.Headers.Get("Set-Cookie")
+        let is302:   bool = resp.StatusCode == 302
+        let hasCode: bool = String_IndexOf(loc, "response_type=code") >= 0
+        let hasCid:  bool = String_IndexOf(loc, "client_id=cid") >= 0
+        let hasState:bool = String_IndexOf(loc, "state=") >= 0
+        let hasCk:   bool = String_IndexOf(cookie, "__oauth_state=") >= 0
+        if (is302 && hasCode && hasCid && hasState && hasCk) {
+            Console.WriteLine("[PASS] StartLogin → 302 + authorize params + state cookie")
+        } else {
+            Console.WriteLine("[FAIL] StartLogin shape: status=" + String_FromInt(resp.StatusCode))
+        }
+
+        // ── 5. CSRF binding: URL state == cookie state ───────────
+        // Pull the state out of the Set-Cookie (between "__oauth_state="
+        // and ";") and assert the Location carries the same value.
+        let ckKey: string = "__oauth_state="
+        let ckIdx: int = String_IndexOf(cookie, ckKey)
+        var bound: bool = false
+        if (ckIdx >= 0) {
+            let afterStart: int = ckIdx + String_Length(ckKey)
+            let after: string = String_Substring(cookie, afterStart, String_Length(cookie) - afterStart)
+            let semi: int = String_IndexOf(after, ";")
+            if (semi > 0) {
+                let cookieState: string = String_Substring(after, 0, semi)
+                if (String_IndexOf(loc, "state=" + cookieState) >= 0) {
+                    bound = true
+                }
+            }
+        }
+        if (bound) {
+            Console.WriteLine("[PASS] StartLogin binds URL state to the state cookie (CSRF)")
+        } else {
+            Console.WriteLine("[FAIL] state/cookie binding")
+        }
+
+        // ── 6. HandleCallback rejects a state mismatch (no network) ─
+        let req2 = new HttpRequest()
+        req2.RawTarget = "/cb?state=aaa&code=xyz"
+        req2.Headers.Set("cookie", "__oauth_state=bbb")
+        let r2: OAuth2Result = gh.HandleCallback(req2)
+        if (!r2.Ok && String_IndexOf(r2.Error, "mismatch") >= 0) {
+            Console.WriteLine("[PASS] HandleCallback rejects state mismatch")
+        } else {
+            Console.WriteLine("[FAIL] state mismatch not caught: err=" + r2.Error)
+        }
+
+        // ── 7. HandleCallback rejects missing state (no network) ──
+        let req3 = new HttpRequest()
+        req3.RawTarget = "/cb?code=xyz"
+        let r3: OAuth2Result = gh.HandleCallback(req3)
+        if (!r3.Ok && String_IndexOf(r3.Error, "state") >= 0) {
+            Console.WriteLine("[PASS] HandleCallback rejects missing state")
+        } else {
+            Console.WriteLine("[FAIL] missing state not caught: err=" + r3.Error)
+        }
+
+        Console.WriteLine("done")
+    }
+}

@@ -187,9 +187,12 @@ public class WebApp {
     // Internal: register a protected route. Called by ProtectedRoutes
     // so the group never reaches through `app.Routes` itself — a
     // `this.App.Routes.AddProtected(...)` chain (this→field→field→
-    // method) currently mis-lowers in cgen, whereas this.Routes.method
-    // (the same shape as Get/Post above) is fine. Keeping the reach-in
-    // here means ProtectedRoutes only ever does `this.App.method()`.
+    // method) used to mis-lower in cgen, whereas this.Routes.method
+    // (the same shape as Get/Post above) is fine. The cgen bug is FIXED
+    // in amc 0.8.74; this indirection is kept so the package keeps
+    // building on the current required-amalgame floor (>=0.8.58). Drop
+    // it (inline the chain in ProtectedRoutes) once the floor is raised
+    // to >= 0.8.74.
     public WebApp addProtectedRoute(string method, string path, Closure<WebContext, HttpResponse> handler) {
         this.Routes.AddProtected(method, path, handler)
         return this
