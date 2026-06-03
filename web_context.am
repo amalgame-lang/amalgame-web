@@ -29,6 +29,10 @@ public class WebContext {
     public Method:    string                  // "GET" / "POST" / ...
     public Path:      string                  // "/users/42" — no query
     public Query:     Map<string, string>     // parsed query string
+    // v0.25.0: the originating request, so handlers reach the raw body
+    // buffer for binary-safe multipart uploads via ctx.Multipart().
+    // null when the context was built without a request (unit tests).
+    public Req:       HttpRequest
 
     public WebContext() {
         this.Params    = new Map<string, string>()
@@ -39,6 +43,7 @@ public class WebContext {
         this.Method    = ""
         this.Path      = ""
         this.Query     = new Map<string, string>()
+        this.Req       = null
     }
 
     public string QueryParam(string name) {
@@ -54,6 +59,21 @@ public class WebContext {
     public string StateOf(string name) {
         if (this.State.Has(name)) { return this.State.Get(name) }
         return ""
+    }
+
+    // v0.25.0: parse a multipart/form-data body (file uploads). Returns
+    // an empty Multipart when there's no request or it isn't multipart.
+    //   let mp = ctx.Multipart()
+    //   let f  = mp.File("avatar")   // UploadedFile or null
+    public Multipart Multipart() {
+        if (this.Req == null) { return new Multipart() }
+        return Multipart.Parse(this.Req)
+    }
+
+    // True when the request carries a multipart/form-data body.
+    public bool IsMultipart() {
+        if (this.Req == null) { return false }
+        return this.Req.IsMultipart()
     }
 
     // v0.24.0: render a template file to an HTML response. `{{x}}` is
