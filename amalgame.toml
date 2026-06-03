@@ -28,9 +28,9 @@
 
 [package]
 name              = "amalgame-web"
-version           = "0.26.0"
+version           = "0.27.0"
 license           = "Apache-2.0"
-description       = "Mosaic — the Amalgame web framework runtime library. v0.26.0 adds a gzip Compression middleware (WithCompress, opt-in, handler-wins) — gzips eligible text responses when the client sends Accept-Encoding: gzip (via amalgame-compress). v0.25.0 surfaces multipart/form-data uploads in handlers: WebContext.Multipart() / IsMultipart() (parser lives in net-http v0.14.1, binary-safe). v0.24.0 adds a pure-Amalgame template engine (Template, Mustache-like) with HTML auto-escape by default — `{{x}}` is escaped, `{{{x}}}` opts out — closing the XSS gap left by HttpResponse.Html(); WebContext.Render(path, data) / RenderString render straight to an HTML response. v0.23.0 adds MosaicServer.AddHandler: mount a raw HttpRequest→HttpResponse closure (e.g. a reverse proxy / load balancer) on a host, sharing the same Host dispatch + SNI + :80→:443 machinery as WebApp sites — keeps amalgame-web proxy-agnostic (the caller wires amalgame-net-proxy). v0.22.0 adds MosaicServer: a multi-site, multi-domain HTTPS front (Host dispatch + SNI + :80→:443 redirect) — the reusable core behind a config-driven `mosaic serve`. v0.21.0 advertises the stack by default (X-Powered-By + Server). v0.20.0 automatic sessions (WithSession + SessionStore interface). v0.19.0 first-class auth (WithBasicAuth / WithJwt + Protected()). Requires net-http v0.13.6+ (SNI + keep-alive)."
+description       = "Mosaic — the Amalgame web framework runtime library. v0.27.0 upgrades static file serving: Last-Modified + If-Modified-Since (304), HTTP Range requests (206 Partial Content / 416), and pre-compressed .gz variant selection when the client accepts gzip. v0.26.0 adds a gzip Compression middleware (WithCompress, opt-in, handler-wins) — gzips eligible text responses when the client sends Accept-Encoding: gzip (via amalgame-compress). v0.25.0 surfaces multipart/form-data uploads in handlers: WebContext.Multipart() / IsMultipart() (parser lives in net-http v0.14.1, binary-safe). v0.24.0 adds a pure-Amalgame template engine (Template, Mustache-like) with HTML auto-escape by default — `{{x}}` is escaped, `{{{x}}}` opts out — closing the XSS gap left by HttpResponse.Html(); WebContext.Render(path, data) / RenderString render straight to an HTML response. v0.23.0 adds MosaicServer.AddHandler: mount a raw HttpRequest→HttpResponse closure (e.g. a reverse proxy / load balancer) on a host, sharing the same Host dispatch + SNI + :80→:443 machinery as WebApp sites — keeps amalgame-web proxy-agnostic (the caller wires amalgame-net-proxy). v0.22.0 adds MosaicServer: a multi-site, multi-domain HTTPS front (Host dispatch + SNI + :80→:443 redirect) — the reusable core behind a config-driven `mosaic serve`. v0.21.0 advertises the stack by default (X-Powered-By + Server). v0.20.0 automatic sessions (WithSession + SessionStore interface). v0.19.0 first-class auth (WithBasicAuth / WithJwt + Protected()). Requires net-http v0.13.6+ (SNI + keep-alive)."
 required-amalgame = ">=0.8.72"
 schema-version    = 1
 
@@ -38,9 +38,9 @@ schema-version    = 1
 # these recursively on `amc package add web`.
 [dependencies]
 amalgame-tls                    = ">=0.3.1"
-amalgame-net-http               = ">=0.14.1"
+amalgame-net-http               = ">=0.15.0"
 amalgame-crypto                 = ">=0.3.0"
-amalgame-datetime               = ">=0.1.0"
+amalgame-datetime               = ">=0.2.2"
 amalgame-random                 = ">=0.1.0"
 amalgame-logging                = ">=0.1.0"
 amalgame-database-nosql-redis   = ">=0.3.0"
