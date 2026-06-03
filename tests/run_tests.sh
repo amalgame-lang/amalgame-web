@@ -327,7 +327,7 @@ gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$TLS_DIR/runtime" -I"$ASYNC_DIR/ru
 # (facade.am + sources from amalgame.toml). The compiler treats
 # them all as the same package; we just have to pass each one to
 # both the lib build and the test --external chain.
-WEB_SOURCES="facade.am session.am web_context.am security_headers.am cors.am rate_limit.am csrf.am log_config.am signed_cookie_session.am redis_session.am acme_config.am tls_binding_config.am basic_auth.am jwt_auth.am oauth2.am static.am powered_by.am web_app.am mosaic_server.am"
+WEB_SOURCES="facade.am session.am template.am web_context.am security_headers.am cors.am rate_limit.am csrf.am log_config.am signed_cookie_session.am redis_session.am acme_config.am tls_binding_config.am basic_auth.am jwt_auth.am oauth2.am static.am powered_by.am web_app.am mosaic_server.am"
 WEB_EXTERNAL_FLAGS=""
 for src in $WEB_SOURCES; do
     WEB_EXTERNAL_FLAGS="$WEB_EXTERNAL_FLAGS --external $src"
@@ -380,6 +380,7 @@ build_and_run() {
     "$BUILD_DIR/$name"
 }
 
+build_and_run template_test              tests/template_test.am
 build_and_run router_test                tests/router_test.am
 build_and_run security_headers_test      tests/security_headers_test.am
 build_and_run cors_test                  tests/cors_test.am
