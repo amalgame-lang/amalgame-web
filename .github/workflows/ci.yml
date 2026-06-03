@@ -177,6 +177,10 @@ jobs:
         shell: bash
         run: |
           set -e
+          # macOS amc dynamically links bdw-gc (libgc.1.dylib from the
+          # Homebrew prefix); install it so `amc --version` can load.
+          # Windows builds bundle their deps — nothing to install.
+          if [ "$RUNNER_OS" = "macOS" ]; then brew install bdw-gc >/dev/null; fi
           TAG="v0.8.72"
           VERSION="${TAG#v}"
           URL="https://github.com/amalgame-lang/Amalgame/releases/download/${TAG}/amc-${VERSION}-${{ matrix.amc_os }}.${{ matrix.ext }}"
