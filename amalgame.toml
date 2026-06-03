@@ -28,9 +28,9 @@
 
 [package]
 name              = "amalgame-web"
-version           = "0.21.0"
+version           = "0.22.0"
 license           = "Apache-2.0"
-description       = "Mosaic — the Amalgame web framework runtime library. v0.21.0 advertises the stack by default: every response carries X-Powered-By + Server: Mosaic (Amalgame) (toggle via WithoutPoweredBy() / WithPoweredBy() or the [powered_by] config table). v0.20.0 adds automatic sessions: WithSession(store) loads ctx.Session from the cookie and persists it, across a unifying SessionStore interface (Memory / Redis / SignedCookie). v0.19.0 made auth first-class (WithBasicAuth / WithJwt + Protected() route group). Requires net-http v0.11.1+."
+description       = "Mosaic — the Amalgame web framework runtime library. v0.22.0 adds MosaicServer: a multi-site, multi-domain HTTPS front (Host dispatch + SNI + :80→:443 redirect) — the reusable core behind a config-driven `mosaic serve`. v0.21.0 advertises the stack by default (X-Powered-By + Server). v0.20.0 automatic sessions (WithSession + SessionStore interface). v0.19.0 first-class auth (WithBasicAuth / WithJwt + Protected()). Requires net-http v0.13.6+ (SNI + keep-alive)."
 required-amalgame = ">=0.8.72"
 schema-version    = 1
 
@@ -38,7 +38,7 @@ schema-version    = 1
 # these recursively on `amc package add web`.
 [dependencies]
 amalgame-tls                    = ">=0.3.1"
-amalgame-net-http               = ">=0.11.1"
+amalgame-net-http               = ">=0.13.6"
 amalgame-crypto                 = ">=0.3.0"
 amalgame-datetime               = ">=0.1.0"
 amalgame-random                 = ">=0.1.0"
@@ -72,6 +72,7 @@ classes   = [
     "TlsBindingConfig",
     "Static",
     "PoweredBy",
+    "MosaicServer",
 ]
 header    = "runtime/Amalgame_Web.h"
 namespace = "Amalgame.Web"
@@ -98,5 +99,6 @@ sources   = [
     "static.am",
     "powered_by.am",
     "web_app.am",
+    "mosaic_server.am",
 ]
 libs      = []
