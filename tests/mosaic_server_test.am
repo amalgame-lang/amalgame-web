@@ -71,6 +71,49 @@ public class Program {
             Console.WriteLine("[FAIL] AddStaticSite")
         }
 
+        // ── 8. AddHandler: raw handler dispatches + 404 fallback ──
+        // The closure stands in for a reverse proxy (req → response).
+        let m4 = MosaicServer.New()
+            .AddHandler(["proxy.example", "www.proxy.example"],
+                        (req: HttpRequest) => HttpResponse.New().Status(200).Text("proxied " + req.Path))
+        let r1: HttpResponse = m4.Dispatch("proxy.example", Program.req("/api"))
+        let r2: HttpResponse = m4.Dispatch("proxy.example:443", Program.req("/api"))
+        let r3: HttpResponse = m4.Dispatch("www.proxy.example", Program.req("/api"))
+        let r4: HttpResponse = m4.Dispatch("ghost.example", Program.req("/"))
+        if (r1.StatusCode == 200 && r2.StatusCode == 200 && r3.StatusCode == 200 && r4.StatusCode == 404) {
+            Console.WriteLine("[PASS] AddHandler: host (+port +www) → handler, unknown → 404")
+        } else {
+            Console.WriteLine("[FAIL] AddHandler dispatch: "
+                + String_FromInt(r1.StatusCode) + "/" + String_FromInt(r2.StatusCode)
+                + "/" + String_FromInt(r3.StatusCode) + "/" + String_FromInt(r4.StatusCode))
+        }
+
+        // ── 9. AddHandler host enters the SNI/ACME domain list ────
+        if (m4.Domains.Count() == 1 && m4.Knows("proxy.example")) {
+            Console.WriteLine("[PASS] AddHandler: apex domain registered (www skipped), Knows() true")
+        } else {
+            Console.WriteLine("[FAIL] AddHandler domains: " + String_FromInt(m4.Domains.Count()))
+        }
+
+        // ── 10. Handler wins over a WebApp site on the same host ──
+        let m5 = MosaicServer.New()
+            .AddSite(["dual.example"], WebApp.New())
+            .AddHandler(["dual.example"], (req: HttpRequest) => HttpResponse.New().Status(202).Text("handler"))
+        let rd: HttpResponse = m5.Dispatch("dual.example", Program.req("/"))
+        if (rd.StatusCode == 202) {
+            Console.WriteLine("[PASS] handler takes precedence over a WebApp site")
+        } else {
+            Console.WriteLine("[FAIL] handler precedence: " + String_FromInt(rd.StatusCode))
+        }
+
         Console.WriteLine("done")
+    }
+
+    // A minimal GET request for the given path (network-free dispatch tests).
+    private static HttpRequest req(string path) {
+        let r: HttpRequest = new HttpRequest()
+        r.Method = "GET"
+        r.Path   = path
+        return r
     }
 }
