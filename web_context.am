@@ -55,4 +55,18 @@ public class WebContext {
         if (this.State.Has(name)) { return this.State.Get(name) }
         return ""
     }
+
+    // v0.24.0: render a template file to an HTML response. `{{x}}` is
+    // HTML-escaped by default (XSS-safe); `{{{x}}}` opts out. Returns a
+    // ready HttpResponse with Content-Type: text/html — handlers do
+    // `return ctx.Render("views/user.html", data)`.
+    public HttpResponse Render(string templatePath, Map<string, string> data) {
+        let t: Template = Template.FromFile(templatePath)
+        return HttpResponse.New().Html(t.Render(data))
+    }
+
+    // Render an inline template source string (no file read).
+    public HttpResponse RenderString(string src, Map<string, string> data) {
+        return HttpResponse.New().Html(Template.RenderString(src, data))
+    }
 }
