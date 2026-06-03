@@ -15,17 +15,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Test against the declared required-amalgame floor (v0.8.72):
-        # v0.20.0's SessionStore is an amc interface value, which needs
-        # interface dispatch (landed v0.8.72) — the old v0.8.58 floor
-        # segfaulted on WithSession and had been red since v0.20.0.
-        amc-tag: [v0.8.72]
         # x86_64 (servers) + arm64 (Raspberry Pi / Apple-silicon CI
         # runners). Both Linux → same apt + bash run_tests.sh + redis
         # service path. ubuntu-24.04-arm is the free native arm64 runner.
+        #
+        # Each platform is a full `include` entry (carrying its own
+        # amc-tag) rather than an `amc-tag` axis + extending includes —
+        # the latter collapses both arch entries onto the single
+        # amc-tag combination, so only the last (arm64) would run.
+        #
+        # amc-tag v0.8.72 = the declared required-amalgame floor:
+        # v0.20.0's SessionStore is an amc interface value needing
+        # interface dispatch (landed v0.8.72); the old v0.8.58 floor
+        # segfaulted on WithSession and had been red since v0.20.0.
         include:
-          - { arch: x86_64, runner: ubuntu-latest }
-          - { arch: arm64,  runner: ubuntu-24.04-arm }
+          - { arch: x86_64, runner: ubuntu-latest,    amc-tag: v0.8.72 }
+          - { arch: arm64,  runner: ubuntu-24.04-arm, amc-tag: v0.8.72 }
     services:
       # v0.8.4+: redis_session_test exercises RedisSessionStore
       # against a live RESP2 server. The test SKIPs cleanly when no
