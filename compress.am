@@ -1,0 +1,131 @@
+// amalgame-web — Compression middleware (gzip response bodies).
+//
+// Opt-in, handler-wins. When the client sends `Accept-Encoding: gzip`
+// and the response is a compressible text body above a size threshold,
+// the body is gzip-compressed (via amalgame-compress) and shipped as a
+// binary response with `Content-Encoding: gzip` + `Vary: Accept-Encoding`.
+//
+// File responses (.File) and already-binary / already-encoded responses
+// are left untouched — static assets get pre-compressed `.gz` selection
+// in the Static middleware instead. The class is `Compression` (not
+// `Compress`) so it doesn't shadow the imported Amalgame.Compress codec.
+
+namespace Amalgame.Web
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.Net.Http
+import Amalgame.Compress
+
+public class Compression {
+    public Enabled: bool
+    public MinSize: int                 // don't compress bodies smaller than this
+    public Types:   List<string>        // Content-Type prefixes to compress
+
+    public Compression() {
+        this.Enabled = true
+        this.MinSize = 1024
+        this.Types   = new List<string>()
+    }
+
+    // Sensible defaults: text/*, JSON, JavaScript, SVG, XML, manifests.
+    public static Compression Default() {
+        var c: Compression = new Compression()
+        c.Types.Add("text/")
+        c.Types.Add("application/json")
+        c.Types.Add("application/javascript")
+        c.Types.Add("application/manifest+json")
+        c.Types.Add("image/svg+xml")
+        c.Types.Add("application/xml")
+        return c
+    }
+
+    // Strict: also compress wasm + a lower threshold.
+    public static Compression Strict() {
+        var c: Compression = Compression.Default()
+        c.MinSize = 256
+        c.Types.Add("application/wasm")
+        return c
+    }
+
+    public Compression WithMinSize(int n) { this.MinSize = n; return this }
+    public Compression WithType(string mime) { this.Types.Add(mime); return this }
+
+    // FromMap: enabled (bool), min_size (int), types (comma-separated).
+    public static Compression FromMap(Map<string, string> cfg) {
+        var c: Compression = Compression.Default()
+        if (cfg.Has("enabled")) {
+            let e: string = String_ToLower(cfg.Get("enabled"))
+            if (e == "false" || e == "0") { c.Enabled = false }
+        }
+        if (cfg.Has("min_size")) { c.MinSize = String_ToInt(cfg.Get("min_size")) }
+        if (cfg.Has("types")) {
+            c.Types = new List<string>()
+            let parts: List<string> = String_Split(cfg.Get("types"), ",")
+            let pn: int = parts.Count()
+            for i in 0..pn {
+                let t: string = String_Trim(parts.Get(i))
+                if (String_Length(t) > 0) { c.Types.Add(t) }
+            }
+        }
+        return c
+    }
+
+    // Idempotent, handler-wins. Compresses resp.BodyText in place
+    // (BodyText → BodyBytes + Content-Encoding) when eligible.
+    public void Apply(HttpRequest req, HttpResponse resp) {
+        if (!this.Enabled) { return }
+        // Already encoded, binary, or file response → leave alone.
+        if (resp.Headers.Has("Content-Encoding") || resp.Headers.Has("content-encoding")) { return }
+        if (resp.HasBytes) { return }
+        if (String_Length(resp.FilePath) > 0) { return }
+        // Client must accept gzip.
+        let ae: string = String_ToLower(req.Header("accept-encoding"))
+        if (String_IndexOf(ae, "gzip") < 0) { return }
+        // Body big enough to be worth it.
+        let body: string = resp.BodyText
+        if (String_Length(body) < this.MinSize) { return }
+        // Content-Type must be in the allowlist.
+        let ct: string = this.contentType(resp)
+        if (!this.typeAllowed(ct)) { return }
+
+        // Compress and ship as a binary body (keeps existing Content-Type).
+        let gz: List<int> = Compress.GzipString(body)
+        resp.Bytes(gz, "")
+        resp.HeaderUnsafe("Content-Encoding", "gzip")
+        this.addVary(resp)
+    }
+
+    // ── internals ───────────────────────────────────────────────────
+
+    string contentType(HttpResponse resp) {
+        if (resp.Headers.Has("Content-Type")) { return resp.Headers.Get("Content-Type") }
+        if (resp.Headers.Has("content-type")) { return resp.Headers.Get("content-type") }
+        return ""
+    }
+
+    bool typeAllowed(string ct) {
+        if (String_Length(ct) == 0) { return false }
+        let lc: string = String_ToLower(ct)
+        let n: int = this.Types.Count()
+        var i: int = 0
+        while (i < n) {
+            if (String_StartsWith(lc, String_ToLower(this.Types.Get(i)))) { return true }
+            i = i + 1
+        }
+        return false
+    }
+
+    void addVary(HttpResponse resp) {
+        var cur: string = ""
+        if (resp.Headers.Has("Vary")) { cur = resp.Headers.Get("Vary") }
+        else if (resp.Headers.Has("vary")) { cur = resp.Headers.Get("vary") }
+        if (String_Length(cur) == 0) {
+            resp.HeaderUnsafe("Vary", "Accept-Encoding")
+        } else {
+            if (String_IndexOf(String_ToLower(cur), "accept-encoding") < 0) {
+                resp.HeaderUnsafe("Vary", cur + ", Accept-Encoding")
+            }
+        }
+    }
+}

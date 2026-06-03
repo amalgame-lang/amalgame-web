@@ -1,0 +1,83 @@
+// Unit tests for Compression (v0.26.0) — gzip response middleware.
+//
+// Verifies eligibility gating (Accept-Encoding, size, content-type,
+// already-encoded) and that an eligible body becomes a gzipped binary
+// response with Content-Encoding + Vary. The gzip codec itself is
+// tested in amalgame-compress; here we test the middleware policy.
+
+namespace Tests
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.Net.Http
+import Amalgame.Web
+
+public class Program {
+    static int checkTrue(string label, bool cond) {
+        if (cond) { Console.WriteLine("[PASS] " + label); return 0 }
+        Console.WriteLine("[FAIL] " + label)
+        return 1
+    }
+
+    public static void Main(string[] args) {
+        Console.WriteLine("amalgame-web — Compression tests")
+        var failed: int = 0
+
+        // A large, compressible text body (~7600 chars).
+        var big: string = ""
+        var i: int = 0
+        while (i < 200) {
+            big = big + "Hello World This Is Compressible Text "
+            i = i + 1
+        }
+
+        // 1. Eligible: gzip accepted, big text body → compressed.
+        var req: HttpRequest = new HttpRequest()
+        req.Headers.Set("accept-encoding", "gzip, deflate")
+        var resp: HttpResponse = HttpResponse.New().Html(big)
+        let c: Compression = Compression.Default()
+        c.Apply(req, resp)
+        failed = failed + Program.checkTrue("eligible → HasBytes", resp.HasBytes)
+        failed = failed + Program.checkTrue("Content-Encoding gzip",
+            resp.Headers.Get("Content-Encoding") == "gzip")
+        failed = failed + Program.checkTrue("Vary set", resp.Headers.Has("Vary"))
+        failed = failed + Program.checkTrue("smaller than original",
+            resp.BodyBytes.Count() < String_Length(big))
+        failed = failed + Program.checkTrue("content-type preserved",
+            resp.Headers.Get("Content-Type") == "text/html; charset=utf-8")
+
+        // 2. No Accept-Encoding → untouched.
+        var req2: HttpRequest = new HttpRequest()
+        var resp2: HttpResponse = HttpResponse.New().Html(big)
+        Compression.Default().Apply(req2, resp2)
+        failed = failed + Program.checkTrue("no Accept-Encoding → skip", !resp2.HasBytes)
+
+        // 3. Body below MinSize → untouched.
+        var req3: HttpRequest = new HttpRequest()
+        req3.Headers.Set("accept-encoding", "gzip")
+        var resp3: HttpResponse = HttpResponse.New().Text("tiny")
+        Compression.Default().Apply(req3, resp3)
+        failed = failed + Program.checkTrue("small body → skip", !resp3.HasBytes)
+
+        // 4. Non-allowlisted content type → untouched.
+        var req4: HttpRequest = new HttpRequest()
+        req4.Headers.Set("accept-encoding", "gzip")
+        var resp4: HttpResponse = HttpResponse.New().Header("Content-Type", "application/octet-stream").Text(big)
+        Compression.Default().Apply(req4, resp4)
+        failed = failed + Program.checkTrue("binary type → skip", !resp4.HasBytes)
+
+        // 5. Disabled middleware → untouched.
+        var req5: HttpRequest = new HttpRequest()
+        req5.Headers.Set("accept-encoding", "gzip")
+        var resp5: HttpResponse = HttpResponse.New().Html(big)
+        var off: Compression = Compression.Default()
+        off.Enabled = false
+        off.Apply(req5, resp5)
+        failed = failed + Program.checkTrue("disabled → skip", !resp5.HasBytes)
+
+        Console.WriteLine("")
+        Console.WriteLine("failed=" + String_FromInt(failed))
+        if (failed > 0) { Console.WriteLine("[FAIL] compress suite") }
+        else { Console.WriteLine("[PASS] compress suite") }
+    }
+}
