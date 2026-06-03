@@ -518,3 +518,61 @@ cache_max_age  = 3600
 - **Auto-index listing** of directories. Intentional: Apache's
   `Options +Indexes` has been a recurring source of accidental
   data exposure. If you need it, register a route handler.
+
+## Auth & protected routes (v0.19.0)
+
+`BasicAuth` (RFC 7617) and `JwtAuth` (HS256 Bearer) are first-class
+middleware: register a scheme with `WithBasicAuth` / `WithJwt`, then
+gate specific routes with the `Protected()` group. Public routes are
+never challenged; a protected route with no scheme configured fails
+closed (401), so a wiring mistake can't silently expose a handler.
+
+```amalgame
+let auth = new JwtAuth(Env_Get("JWT_SECRET"))
+
+let app = WebApp.New()
+    .WithJwt(auth)
+    .WithSecurityHeaders(SecurityHeaders.StrictApi())
+    .Get("/",       ctx => HttpResponse.New().Text("public landing"))
+    .Get("/health", ctx => HttpResponse.New().Text("ok"))
+
+// Everything in the group requires a valid token (401 otherwise):
+app.Protected()
+    .Get("/api/me",      ctx => HttpResponse.New().Json(currentUser(ctx)))
+    .Post("/api/widgets", ctx => createWidget(ctx))
+    .End()
+    .Get("/about", ctx => HttpResponse.New().Text("public again"))
+
+app.ServeHttps(443, "/etc/ssl/cert.pem", "/etc/ssl/key.pem")
+```
+
+`Protected()` returns a route group whose `Get/Post/Put/Patch/Delete`
+register guarded routes and chain; `End()` climbs back to the `WebApp`
+so public routes can follow. Configure **both** schemes to accept
+either — e.g. Bearer JWT for the API plus Basic for a curl-friendly
+admin endpoint:
+
+```amalgame
+let basic = new BasicAuth("Admin")
+    .WithVerifier((u, p) => u == "admin" && p == Env_Get("ADMIN_PASSWORD"))
+
+let app = WebApp.New()
+    .WithJwt(new JwtAuth(Env_Get("JWT_SECRET")))
+    .WithBasicAuth(basic)
+    .Get("/", ctx => HttpResponse.New().Text("home"))
+app.Protected()
+    .Get("/admin", ctx => HttpResponse.New().Text("dashboard"))
+```
+
+Pipeline placement: auth runs **after** a route matches, before its
+handler — so unmatched paths (404) and public routes pay nothing. A
+denial still flows through the response-side middlewares, so the 401
+carries `SecurityHeaders` / CORS just like any other response.
+
+- **MUST ship over TLS.** Basic puts the password and Bearer puts
+  the token on every request. Pair with `ServeHttps` / `ServeHttpsMt`.
+- **JWT**: HS256 only (v0.19.0); verifies signature + `exp` / `nbf`.
+  Read claims in the handler with your own `Json.Parse(jwt.Payload(req))`.
+- **`OAuth2Client`** (authorization-code flow helper) ships in the
+  package for login redirects + token exchange; wire its callback as
+  an ordinary route handler.
