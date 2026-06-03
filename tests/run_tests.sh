@@ -166,6 +166,23 @@ if [ -z "$REDIS_DIR" ] || [ ! -f "$REDIS_DIR/amalgame.toml" ]; then
     exit 2
 fi
 
+# Locate amalgame-compress (used by the Compression middleware since
+# v0.26.0). C-only package — same fake-cache wiring as redis/threading.
+COMPRESS_DIR=""
+if [ -n "$AMALGAME_COMPRESS" ] && [ -d "$AMALGAME_COMPRESS" ]; then
+    COMPRESS_DIR="$AMALGAME_COMPRESS"
+elif [ -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-compress" ]; then
+    COMPRESS_DIR="$(ls -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-compress"/*/ 2>/dev/null | head -1)"
+    COMPRESS_DIR="${COMPRESS_DIR%/}"
+elif [ -d "$PKG_DIR/../amalgame-compress" ]; then
+    COMPRESS_DIR="$PKG_DIR/../amalgame-compress"
+fi
+if [ -z "$COMPRESS_DIR" ] || [ ! -f "$COMPRESS_DIR/amalgame.toml" ]; then
+    echo -e "${RED}error: amalgame-compress not found${NC}"
+    echo "  set AMALGAME_COMPRESS=<path> or run \`amc package add compress\`"
+    exit 2
+fi
+
 # Stage a fake AMALGAME_PACKAGES_DIR cache pointing at REDIS_DIR.
 # This is the same dance the redis package's own tests use — needed
 # because the package is C-only (no .am facade to --external) and
@@ -226,6 +243,15 @@ THREADING_CACHE_DIR="$SHARED_FAKE_CACHE/$THREADING_PKG_GIT/${THREADING_PKG_TAG}_
 mkdir -p "$(dirname "$THREADING_CACHE_DIR")"
 rm -rf "$THREADING_CACHE_DIR"
 ln -s "$THREADING_DIR" "$THREADING_CACHE_DIR"
+
+COMPRESS_PKG_GIT="github.com/amalgame-lang/amalgame-compress"
+COMPRESS_PKG_TAG="v0.1.0"
+COMPRESS_FAKE_SHA="0c0m0p0r0e0s0s00000000000000000000000abc"
+COMPRESS_SHORT_SHA="${COMPRESS_FAKE_SHA:0:8}"
+COMPRESS_CACHE_DIR="$SHARED_FAKE_CACHE/$COMPRESS_PKG_GIT/${COMPRESS_PKG_TAG}_${COMPRESS_SHORT_SHA}"
+mkdir -p "$(dirname "$COMPRESS_CACHE_DIR")"
+rm -rf "$COMPRESS_CACHE_DIR"
+ln -s "$COMPRESS_DIR" "$COMPRESS_CACHE_DIR"
 
 # v0.11.0: net-http also in the cache + lock so PkgRegistry knows
 # Http1.Serve/ServeMt/H1Conn etc. — WebApp.Serve calls them
@@ -293,6 +319,12 @@ name = "amalgame-async"
 git  = "$ASYNC_PKG_GIT"
 tag  = "$ASYNC_PKG_TAG"
 rev  = "$ASYNC_FAKE_SHA"
+
+[[package]]
+name = "amalgame-compress"
+git  = "$COMPRESS_PKG_GIT"
+tag  = "$COMPRESS_PKG_TAG"
+rev  = "$COMPRESS_FAKE_SHA"
 EOF
 
 # Build sibling facade .o files once, then amalgame-web's own.
@@ -327,7 +359,7 @@ gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$TLS_DIR/runtime" -I"$ASYNC_DIR/ru
 # (facade.am + sources from amalgame.toml). The compiler treats
 # them all as the same package; we just have to pass each one to
 # both the lib build and the test --external chain.
-WEB_SOURCES="facade.am session.am template.am web_context.am security_headers.am cors.am rate_limit.am csrf.am log_config.am signed_cookie_session.am redis_session.am acme_config.am tls_binding_config.am basic_auth.am jwt_auth.am oauth2.am static.am powered_by.am web_app.am mosaic_server.am"
+WEB_SOURCES="facade.am session.am template.am web_context.am security_headers.am cors.am rate_limit.am csrf.am log_config.am signed_cookie_session.am redis_session.am acme_config.am tls_binding_config.am basic_auth.am jwt_auth.am oauth2.am static.am powered_by.am compress.am web_app.am mosaic_server.am"
 WEB_EXTERNAL_FLAGS=""
 for src in $WEB_SOURCES; do
     WEB_EXTERNAL_FLAGS="$WEB_EXTERNAL_FLAGS --external $src"
@@ -352,7 +384,7 @@ NETHTTP_EXTERNAL_FLAGS=""
     --external "$RANDOM_DIR/facade.am" \
     --external "$LOGGING_DIR/facade.am" \
     --external "$CRYPTO_DIR/facade.am" 2>&1 | tail -30
-gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$TLS_DIR/runtime" -I"$ASYNC_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$CRYPTO_DIR" -I"$REDIS_DIR/runtime" -I"$RUNTIME_DIR" -c "$BUILD_DIR/facade.c" -o "$BUILD_DIR/facade.o" 2>"$BUILD_DIR/gcc-last.log"; head -5 "$BUILD_DIR/gcc-last.log"
+gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$TLS_DIR/runtime" -I"$ASYNC_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$CRYPTO_DIR" -I"$REDIS_DIR/runtime" -I"$COMPRESS_DIR/runtime" -I"$RUNTIME_DIR" -c "$BUILD_DIR/facade.c" -o "$BUILD_DIR/facade.o" 2>"$BUILD_DIR/gcc-last.log"; head -5 "$BUILD_DIR/gcc-last.log"
 [ -s "$BUILD_DIR/facade.o" ] || { echo -e "${RED}facade build failed${NC}"; exit 1; }
 
 # Build + run one test file. --external order matters: net-http first
@@ -370,9 +402,10 @@ build_and_run() {
         --external "$LOGGING_DIR/facade.am" \
         --external "$CRYPTO_DIR/facade.am" \
         $WEB_EXTERNAL_FLAGS 2>&1 | tail -30
-    gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$TLS_DIR/runtime" -I"$ASYNC_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$CRYPTO_DIR" -I"$REDIS_DIR/runtime" -I"$THREADING_DIR/runtime" -I"$RUNTIME_DIR" \
+    gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$TLS_DIR/runtime" -I"$ASYNC_DIR/runtime" -I"$DATETIME_DIR" -I"$RANDOM_DIR" -I"$LOGGING_DIR" -I"$CRYPTO_DIR" -I"$REDIS_DIR/runtime" -I"$THREADING_DIR/runtime" -I"$COMPRESS_DIR/runtime" -I"$RUNTIME_DIR" \
         -include "$THREADING_DIR/runtime/Amalgame_Threading.h" \
         -include "$REDIS_DIR/runtime/Amalgame_Database_Redis.h" \
+        -include "$COMPRESS_DIR/runtime/Amalgame_Compress.h" \
         "$BUILD_DIR/$name.c" "$BUILD_DIR/facade.o" "$BUILD_DIR/nethttp.o" "$BUILD_DIR/datetime.o" "$BUILD_DIR/random.o" "$BUILD_DIR/logging.o" "$BUILD_DIR/crypto.o" \
         -lgc -lm -lz -lssl -lcrypto -lpthread -o "$BUILD_DIR/$name" 2>"$BUILD_DIR/gcc-last.log" || true
     head -10 "$BUILD_DIR/gcc-last.log"
@@ -381,6 +414,7 @@ build_and_run() {
 }
 
 build_and_run template_test              tests/template_test.am
+build_and_run compress_test              tests/compress_test.am
 build_and_run router_test                tests/router_test.am
 build_and_run security_headers_test      tests/security_headers_test.am
 build_and_run cors_test                  tests/cors_test.am
