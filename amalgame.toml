@@ -28,9 +28,9 @@
 
 [package]
 name              = "amalgame-web"
-version           = "0.19.0"
+version           = "0.20.0"
 license           = "Apache-2.0"
-description       = "Mosaic — the Amalgame web framework runtime library. v0.19.0 makes auth first-class: WithBasicAuth / WithJwt + a Protected() route group gate routes through the WebApp pipeline (fail-closed). v0.17.1+ requires net-http v0.11.1+ so SetCookie / Cors / SecurityHeaders / CSRF / RateLimit / OAuth2 cookies make the wire."
+description       = "Mosaic — the Amalgame web framework runtime library. v0.20.0 adds automatic sessions: WithSession(store) loads ctx.Session from the cookie and persists it, across a unifying SessionStore interface (Memory / Redis / SignedCookie). v0.19.0 made auth first-class (WithBasicAuth / WithJwt + Protected() route group). Requires net-http v0.11.1+."
 required-amalgame = ">=0.8.58"
 schema-version    = 1
 
