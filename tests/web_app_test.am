@@ -177,6 +177,91 @@ public class Program {
             Console.WriteLine("[FAIL] WithState got body: " + r10.BodyText)
         }
 
+        // ── 11. Protected() route with NO auth configured fails closed ─
+        // A guarded route must never expose its handler just because
+        // the app forgot to wire an auth scheme. Public routes stay 200.
+        let app11 = WebApp.New()
+            .Get("/", ctx => HttpResponse.New().Text("public"))
+        app11.Protected()
+            .Get("/admin", ctx => HttpResponse.New().Text("secret-area"))
+        let req11a = new HttpRequest()
+        req11a.Method = "GET"
+        req11a.Path   = "/admin"
+        let r11a: HttpResponse = app11.Handle(req11a)
+        let req11b = new HttpRequest()
+        req11b.Method = "GET"
+        req11b.Path   = "/"
+        let r11b: HttpResponse = app11.Handle(req11b)
+        if (r11a.StatusCode == 401 && r11b.StatusCode == 200 && r11b.BodyText == "public") {
+            Console.WriteLine("[PASS] Protected route fails closed (401), public route unaffected (200)")
+        } else {
+            Console.WriteLine("[FAIL] fail-closed: admin=" + String_FromInt(r11a.StatusCode) + " public=" + String_FromInt(r11b.StatusCode))
+        }
+
+        // ── 12/13. BasicAuth gates a Protected() route ────────────
+        let basic = new BasicAuth("Admin Area")
+            .WithVerifier((u: string, p: string) => u == "admin" && p == "secret")
+        let app12 = WebApp.New()
+            .WithBasicAuth(basic)
+            .Get("/", ctx => HttpResponse.New().Text("home"))
+        app12.Protected()
+            .Get("/admin", ctx => HttpResponse.New().Text("dashboard"))
+        // 12. No credentials → 401 with WWW-Authenticate
+        let req12 = new HttpRequest()
+        req12.Method = "GET"
+        req12.Path   = "/admin"
+        let r12: HttpResponse = app12.Handle(req12)
+        if (r12.StatusCode == 401 && r12.Headers.Has("WWW-Authenticate")) {
+            Console.WriteLine("[PASS] BasicAuth: no creds → 401 + WWW-Authenticate")
+        } else {
+            Console.WriteLine("[FAIL] BasicAuth no-creds: " + String_FromInt(r12.StatusCode))
+        }
+        // 13. Valid credentials (base64 of "admin:secret") → 200 handler
+        let req13 = new HttpRequest()
+        req13.Method = "GET"
+        req13.Path   = "/admin"
+        req13.Headers.Set("authorization", "Basic YWRtaW46c2VjcmV0")
+        let r13: HttpResponse = app12.Handle(req13)
+        if (r13.StatusCode == 200 && r13.BodyText == "dashboard") {
+            Console.WriteLine("[PASS] BasicAuth: valid creds → 200, handler runs")
+        } else {
+            Console.WriteLine("[FAIL] BasicAuth valid-creds: " + String_FromInt(r13.StatusCode) + " body=" + r13.BodyText)
+        }
+
+        // ── 14. JWT wiring rejects a tokenless request on a guard ──
+        let jwt = new JwtAuth("test-secret")
+        let app14 = WebApp.New()
+            .WithJwt(jwt)
+            .Get("/", ctx => HttpResponse.New().Text("ok"))
+        app14.Protected()
+            .Get("/api/data", ctx => HttpResponse.New().Text("data"))
+        let req14 = new HttpRequest()
+        req14.Method = "GET"
+        req14.Path   = "/api/data"
+        let r14: HttpResponse = app14.Handle(req14)
+        if (r14.StatusCode == 401) {
+            Console.WriteLine("[PASS] JWT: missing Bearer on protected route → 401")
+        } else {
+            Console.WriteLine("[FAIL] JWT no-token: " + String_FromInt(r14.StatusCode))
+        }
+
+        // ── 15. End() climbs back so public routes can follow a group ─
+        let app15 = WebApp.New()
+            .WithBasicAuth(basic)
+        app15.Protected()
+            .Get("/admin", ctx => HttpResponse.New().Text("dash"))
+            .End()
+            .Get("/health", ctx => HttpResponse.New().Text("healthy"))
+        let req15 = new HttpRequest()
+        req15.Method = "GET"
+        req15.Path   = "/health"
+        let r15: HttpResponse = app15.Handle(req15)
+        if (r15.StatusCode == 200 && r15.BodyText == "healthy") {
+            Console.WriteLine("[PASS] End() returns app; public route after group needs no auth")
+        } else {
+            Console.WriteLine("[FAIL] End() public route: " + String_FromInt(r15.StatusCode) + " body=" + r15.BodyText)
+        }
+
         Console.WriteLine("done")
     }
 }

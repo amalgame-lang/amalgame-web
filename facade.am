@@ -75,11 +75,18 @@ public class Route {
     public Handler:     Closure<WebContext, HttpResponse>   // amc v0.8.35+ typed closure
     public Segments:    List<string>            // pre-split: ["users", ":id"]
     public ParamNames:  List<string>            // [":id" → "id"], for fast match
+    // v0.19.0: routes registered through WebApp.Protected() carry this
+    // flag. The dispatch pipeline runs the configured auth middleware
+    // (Basic / JWT) on a matched protected route before invoking its
+    // handler, and fails closed (401) if the route is protected but no
+    // auth is configured. Default false — ordinary routes are public.
+    public Protected:   bool
 
     public Route(string method, string path, Closure<WebContext, HttpResponse> handler) {
         this.Method     = method
         this.Path       = path
         this.Handler    = handler
+        this.Protected  = false
         this.Segments   = Route.SplitPath(path)
         this.ParamNames = new List<string>()
         let sn: int = this.Segments.Count()
@@ -178,6 +185,17 @@ public class Router {
     public Router Put(string path, Closure<WebContext, HttpResponse> handler)    { return this.Add("PUT", path, handler) }
     public Router Patch(string path, Closure<WebContext, HttpResponse> handler)  { return this.Add("PATCH", path, handler) }
     public Router Delete(string path, Closure<WebContext, HttpResponse> handler) { return this.Add("DELETE", path, handler) }
+
+    // v0.19.0: register an auth-protected route. Same matching as
+    // Add(), but the resulting Route carries Protected=true so the
+    // WebApp dispatch pipeline gates it behind the configured auth
+    // middleware. Used by WebApp.Protected()'s route group.
+    public Router AddProtected(string method, string path, Closure<WebContext, HttpResponse> handler) {
+        let r = new Route(method, path, handler)
+        r.Protected = true
+        this.Routes.Add(r)
+        return this
+    }
 
     // Match (method, path) against registered routes. Returns null if
     // no route matches, else a RouteMatch with extracted params.

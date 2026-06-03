@@ -68,6 +68,14 @@ public class WebApp {
     public CsrfCfg:         Csrf              // null = no CSRF validation
     public Limiter:         RateLimit         // null = no rate limit
     public Logging:         LogConfig         // null = no access log
+    // v0.19.0: auth middleware. Both nullable — null = not configured.
+    // They gate ONLY routes registered via Protected() (Route.Protected
+    // == true); public routes are never challenged. When a protected
+    // route matches, the pipeline accepts the request if EITHER
+    // configured scheme verifies; a protected route with no auth
+    // configured fails closed (401). See dispatch()'s auth step.
+    public BasicAuthCfg:    BasicAuth         // null = no Basic auth
+    public JwtAuthCfg:      JwtAuth           // null = no Bearer/JWT auth
     // v0.13.0: ordered list of Static mounts. Checked between
     // CSRF validation and the router on every request — first
     // mount whose prefix matches handles the response. Static
@@ -92,6 +100,8 @@ public class WebApp {
         this.CsrfCfg       = null
         this.Limiter       = null
         this.Logging       = null
+        this.BasicAuthCfg  = null
+        this.JwtAuthCfg    = null
         this.StaticMounts  = new List<Static>()
         this.State         = new Map<string, string>()
         this.StateMu       = Threading.MutexNew()
@@ -104,6 +114,11 @@ public class WebApp {
     public WebApp WithCors(Cors c)                         { this.CorsCfg = c;    return this }
     public WebApp WithCsrf(Csrf c)                         { this.CsrfCfg = c;    return this }
     public WebApp WithRateLimit(RateLimit rl)              { this.Limiter = rl;   return this }
+    // v0.19.0: register auth schemes. They challenge only Protected()
+    // routes. Configure both to accept either (e.g. Bearer JWT for the
+    // API + Basic for a curl-friendly admin endpoint).
+    public WebApp WithBasicAuth(BasicAuth ba)              { this.BasicAuthCfg = ba; return this }
+    public WebApp WithJwt(JwtAuth ja)                      { this.JwtAuthCfg   = ja; return this }
     // v0.13.0: register a static-file mount. Order matters —
     // mounts are checked first-to-last on every request, so
     // declare more-specific prefixes ("/assets/v2") before
@@ -136,6 +151,35 @@ public class WebApp {
     public WebApp Put(string path, Closure<WebContext, HttpResponse> handler)    { this.Routes.Put(path, handler);    return this }
     public WebApp Patch(string path, Closure<WebContext, HttpResponse> handler)  { this.Routes.Patch(path, handler);  return this }
     public WebApp Delete(string path, Closure<WebContext, HttpResponse> handler) { this.Routes.Delete(path, handler); return this }
+
+    // ── v0.19.0: auth-protected route group ───────────
+    // Returns a ProtectedRoutes proxy whose Get/Post/... register
+    // routes flagged Protected=true. Those routes are gated behind the
+    // configured auth middleware (WithBasicAuth / WithJwt) in dispatch.
+    //
+    //     app.WithJwt(new JwtAuth(secret))
+    //        .Get("/", home)                  // public
+    //        .Protected()
+    //            .Get("/admin",  admin)        // requires a valid token
+    //            .Post("/api/x", create)
+    //
+    // Declare protected routes after the public ones (Protected()
+    // returns the group, not the app — End() climbs back to the app
+    // if you need to keep chaining app-level config afterwards).
+    public ProtectedRoutes Protected() {
+        return new ProtectedRoutes(this)
+    }
+
+    // Internal: register a protected route. Called by ProtectedRoutes
+    // so the group never reaches through `app.Routes` itself — a
+    // `this.App.Routes.AddProtected(...)` chain (this→field→field→
+    // method) currently mis-lowers in cgen, whereas this.Routes.method
+    // (the same shape as Get/Post above) is fine. Keeping the reach-in
+    // here means ProtectedRoutes only ever does `this.App.method()`.
+    public WebApp addProtectedRoute(string method, string path, Closure<WebContext, HttpResponse> handler) {
+        this.Routes.AddProtected(method, path, handler)
+        return this
+    }
 
     // ── The orchestrator ─────────────────────────────
     // Runs the configured pipeline on `req` and returns the final
@@ -222,6 +266,12 @@ public class WebApp {
         var resp: HttpResponse
         if (m == null) {
             resp = HttpResponse.New().Status(404).Text("Not found")
+        } else if (m.Route.Protected && this.authDeny(req) != null) {
+            // v0.19.0: matched a Protected() route but auth failed.
+            // Short-circuit with the denial response (401/403) — the
+            // handler never runs. Public routes and 404s skip this
+            // entirely, so unprotected traffic pays nothing.
+            resp = this.authDeny(req)
         } else {
             let ctx = new WebContext()
             ctx.Params = m.Params
@@ -277,6 +327,40 @@ public class WebApp {
             this.CorsCfg.Apply(req, resp)
         }
         return resp
+    }
+
+    // ── v0.19.0: auth gate for Protected() routes ────
+    // Evaluate the configured auth schemes against a request bound for
+    // a protected route. Returns null when access is GRANTED (any
+    // configured scheme verifies), else the denial HttpResponse (the
+    // scheme's own 401/403 carrying WWW-Authenticate). A protected
+    // route with NO auth configured fails closed with a bare 401 — a
+    // misconfiguration should never silently expose a guarded handler.
+    //
+    // Reject() is idempotent and side-effect free, so re-running it
+    // (dispatch tests `!= null` then reuses the result) is safe; the
+    // cost is a couple of HMAC verifies on the protected path only.
+    private HttpResponse authDeny(HttpRequest req) {
+        var configured: bool = false
+        if (this.JwtAuthCfg != null) {
+            configured = true
+            if (this.JwtAuthCfg.Reject(req) == null) { return null }
+        }
+        if (this.BasicAuthCfg != null) {
+            configured = true
+            if (this.BasicAuthCfg.Reject(req) == null) { return null }
+        }
+        if (!configured) {
+            return HttpResponse.New()
+                .Status(401)
+                .Header("Content-Type", "text/plain; charset=UTF-8")
+                .Text("Authentication required")
+        }
+        // A scheme is configured but none granted access. Prefer the
+        // JWT challenge (API default); fall back to Basic's so browsers
+        // get a credential prompt.
+        if (this.JwtAuthCfg != null) { return this.JwtAuthCfg.Reject(req) }
+        return this.BasicAuthCfg.Reject(req)
     }
 
     // ── v0.11.0: Drop-in HTTP/1.1 server entry points ─
@@ -450,4 +534,39 @@ public class WebApp {
         }
         return Http1.ServeAsyncWith(port, cfg, handler)
     }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// ProtectedRoutes — v0.19.0 auth-protected route group.
+//
+// Returned by WebApp.Protected(). Its verb methods register routes
+// flagged Protected=true on the parent app's router (via
+// Router.AddProtected), so the dispatch pipeline gates them behind the
+// configured auth middleware. Each verb returns the group for fluent
+// chaining of several protected routes; End() climbs back to the
+// WebApp when you need to resume app-level configuration afterwards.
+//
+//     app.WithBasicAuth(adminAuth)
+//        .Get("/", home)
+//        .Protected()
+//            .Get("/admin",        dashboard)
+//            .Post("/admin/users", createUser)
+//        .End()
+//        .Get("/health", health)   // public again
+// ─────────────────────────────────────────────────────────────────
+public class ProtectedRoutes {
+    public App: WebApp
+
+    public ProtectedRoutes(WebApp app) {
+        this.App = app
+    }
+
+    public ProtectedRoutes Get(string path, Closure<WebContext, HttpResponse> handler)    { this.App.addProtectedRoute("GET", path, handler);    return this }
+    public ProtectedRoutes Post(string path, Closure<WebContext, HttpResponse> handler)   { this.App.addProtectedRoute("POST", path, handler);   return this }
+    public ProtectedRoutes Put(string path, Closure<WebContext, HttpResponse> handler)    { this.App.addProtectedRoute("PUT", path, handler);    return this }
+    public ProtectedRoutes Patch(string path, Closure<WebContext, HttpResponse> handler)  { this.App.addProtectedRoute("PATCH", path, handler);  return this }
+    public ProtectedRoutes Delete(string path, Closure<WebContext, HttpResponse> handler) { this.App.addProtectedRoute("DELETE", path, handler); return this }
+
+    // Climb back to the WebApp to resume app-level chaining.
+    public WebApp End() { return this.App }
 }
