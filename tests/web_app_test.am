@@ -262,6 +262,60 @@ public class Program {
             Console.WriteLine("[FAIL] End() public route: " + String_FromInt(r15.StatusCode) + " body=" + r15.BodyText)
         }
 
+        // ── 16. WithSession (Memory): cookie id → ctx.Session loaded ─
+        let store16 = new MemorySessionStore()
+        let pre16: Session = store16.Create("sid-abc")
+        pre16.Set("role", "admin")
+        let app16 = WebApp.New()
+            .WithSession(store16)
+            .Get("/whoami", (ctx: WebContext) => HttpResponse.New().Text(ctx.Session.Get("role")))
+        let req16 = new HttpRequest()
+        req16.Method = "GET"
+        req16.Path   = "/whoami"
+        req16.Headers.Set("cookie", "mosaic_session=sid-abc")
+        let r16: HttpResponse = app16.Handle(req16)
+        if (r16.StatusCode == 200 && r16.BodyText == "admin") {
+            Console.WriteLine("[PASS] Session: cookie id loads server-side data into ctx.Session")
+        } else {
+            Console.WriteLine("[FAIL] Session load: status=" + String_FromInt(r16.StatusCode) + " body=" + r16.BodyText)
+        }
+
+        // ── 17. WithSession (Memory): fresh visitor → Set-Cookie + stored ─
+        let store17 = new MemorySessionStore()
+        let app17 = WebApp.New()
+            .WithSession(store17)
+            .Get("/visit", (ctx: WebContext) => {
+                ctx.Session.Set("seen", "yes")
+                return HttpResponse.New().Text("ok")
+            })
+        let req17 = new HttpRequest()
+        req17.Method = "GET"
+        req17.Path   = "/visit"
+        let r17: HttpResponse = app17.Handle(req17)
+        if (r17.StatusCode == 200 && r17.Headers.Has("Set-Cookie") && store17.Size() == 1) {
+            Console.WriteLine("[PASS] Session: fresh visitor minted, persisted + Set-Cookie")
+        } else {
+            Console.WriteLine("[FAIL] Session new: cookie=" + String_FromInt(r17.StatusCode) + " size=" + String_FromInt(store17.Size()))
+        }
+
+        // ── 18. WithSession (SignedCookie, stateless): handler write → Set-Cookie ─
+        let signed18 = new SignedCookieSessionStore("test-secret-key-18")
+        let app18 = WebApp.New()
+            .WithSession(signed18)
+            .Get("/login", (ctx: WebContext) => {
+                ctx.Session.Set("uid", "42")
+                return HttpResponse.New().Text("logged-in")
+            })
+        let req18 = new HttpRequest()
+        req18.Method = "GET"
+        req18.Path   = "/login"
+        let r18: HttpResponse = app18.Handle(req18)
+        if (r18.StatusCode == 200 && r18.Headers.Has("Set-Cookie")) {
+            Console.WriteLine("[PASS] Session (stateless cookie store): handler write → Set-Cookie")
+        } else {
+            Console.WriteLine("[FAIL] SignedCookie session: " + String_FromInt(r18.StatusCode))
+        }
+
         Console.WriteLine("done")
     }
 }
