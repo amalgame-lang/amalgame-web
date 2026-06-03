@@ -386,6 +386,7 @@ build_and_run cors_test                  tests/cors_test.am
 build_and_run rate_limit_test            tests/rate_limit_test.am
 build_and_run csrf_test                  tests/csrf_test.am
 build_and_run web_app_test               tests/web_app_test.am
+build_and_run oauth2_test                tests/oauth2_test.am
 build_and_run signed_cookie_session_test tests/signed_cookie_session_test.am
 build_and_run redis_session_test         tests/redis_session_test.am
 build_and_run acme_config_test           tests/acme_config_test.am
