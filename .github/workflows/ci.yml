@@ -128,6 +128,13 @@ jobs:
           ref: v0.2.2
           path: amalgame-async
 
+      # v0.26.0: Compression middleware uses amalgame-compress (zlib).
+      - uses: actions/checkout@v4
+        with:
+          repository: amalgame-lang/amalgame-compress
+          ref: v0.1.0
+          path: amalgame-compress
+
       - name: Install system deps
         run: |
           sudo apt-get update -qq
@@ -157,6 +164,7 @@ jobs:
           AMALGAME_DB_REDIS: ${{ github.workspace }}/amalgame-database-nosql-redis
           AMALGAME_THREADING: ${{ github.workspace }}/amalgame-threading
           AMALGAME_ASYNC:     ${{ github.workspace }}/amalgame-async
+          AMALGAME_COMPRESS:  ${{ github.workspace }}/amalgame-compress
         run: ./tests/run_tests.sh "$AMC"
 
   # macOS / Windows — best-effort toolchain smoke. The full test runner
