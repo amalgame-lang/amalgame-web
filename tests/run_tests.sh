@@ -338,7 +338,7 @@ EOF
 # the .o, the final link of each test binary fails. Pre-split
 # net-http (v0.4.5 and earlier) had everything in facade.am; since
 # v0.4.6 the user (or test runner) has to enumerate.
-NETHTTP_SOURCES="$NETHTTP_DIR/facade.am $NETHTTP_DIR/cookie.am $NETHTTP_DIR/http_request.am $NETHTTP_DIR/http_response.am $NETHTTP_DIR/http_parser.am $NETHTTP_DIR/http_server.am $NETHTTP_DIR/http_client.am $NETHTTP_DIR/multipart.am"
+NETHTTP_SOURCES="$NETHTTP_DIR/facade.am $NETHTTP_DIR/cookie.am $NETHTTP_DIR/http_request.am $NETHTTP_DIR/http_response.am $NETHTTP_DIR/http_parser.am $NETHTTP_DIR/http_server.am $NETHTTP_DIR/http_client.am $NETHTTP_DIR/multipart.am $NETHTTP_DIR/sse.am"
 "$AMC" --lib -o "$BUILD_DIR/nethttp" $NETHTTP_SOURCES 2>&1 | tail -30
 gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$TLS_DIR/runtime" -I"$ASYNC_DIR/runtime" -I"$DATETIME_DIR" -I"$RUNTIME_DIR" -c "$BUILD_DIR/nethttp.c" -o "$BUILD_DIR/nethttp.o" 2>"$BUILD_DIR/gcc-last.log" || true
 head -30 "$BUILD_DIR/gcc-last.log"
@@ -359,7 +359,7 @@ gcc -O2 -Iruntime -I"$NETHTTP_DIR/runtime" -I"$TLS_DIR/runtime" -I"$ASYNC_DIR/ru
 # (facade.am + sources from amalgame.toml). The compiler treats
 # them all as the same package; we just have to pass each one to
 # both the lib build and the test --external chain.
-WEB_SOURCES="facade.am session.am template.am web_context.am security_headers.am cors.am rate_limit.am csrf.am log_config.am signed_cookie_session.am redis_session.am acme_config.am tls_binding_config.am basic_auth.am jwt_auth.am oauth2.am static.am powered_by.am compress.am web_app.am mosaic_server.am"
+WEB_SOURCES="facade.am session.am template.am web_context.am security_headers.am cors.am rate_limit.am csrf.am log_config.am signed_cookie_session.am redis_session.am acme_config.am tls_binding_config.am basic_auth.am jwt_auth.am oauth2.am static.am powered_by.am compress.am sse_route.am web_app.am mosaic_server.am"
 WEB_EXTERNAL_FLAGS=""
 for src in $WEB_SOURCES; do
     WEB_EXTERNAL_FLAGS="$WEB_EXTERNAL_FLAGS --external $src"
@@ -415,6 +415,7 @@ build_and_run() {
 
 build_and_run template_test              tests/template_test.am
 build_and_run compress_test              tests/compress_test.am
+build_and_run sse_test                   tests/sse_test.am
 build_and_run router_test                tests/router_test.am
 build_and_run security_headers_test      tests/security_headers_test.am
 build_and_run cors_test                  tests/cors_test.am
