@@ -17,6 +17,7 @@
 //     5. Csrf.EnsureToken        (sets cookie on response if absent)
 //     6. SecurityHeaders.Apply   (stamps CSP / HSTS / etc.)
 //     7. Cors.Apply              (adds Allow-Origin / Vary)
+//     8. PoweredBy.Apply         (X-Powered-By + Server — ON by default)
 //   → response
 //
 // Steps 1-3 can short-circuit (return non-null HttpResponse); the
@@ -91,6 +92,12 @@ public class WebApp {
     // bypasses CSRF response middlewares (no Set-Cookie for an
     // asset) but still gets SecurityHeaders / CORS stamped on.
     public StaticMounts:    List<Static>
+    // v0.21.0: server-identity advertisement (X-Powered-By + Server).
+    // ON BY DEFAULT — the constructor wires PoweredBy.Default(), so a
+    // bare WebApp.New() already announces "Mosaic (Amalgame)". Disable
+    // with WithoutPoweredBy() (or [powered_by] enabled=false in config).
+    // Never null in practice, but treated nullably for symmetry.
+    public PoweredByCfg:    PoweredBy
     public State:           Map<string, string>  // app-level shared state
 
     // v0.9.4: mutex protecting State. WithState() can legitimately be
@@ -112,6 +119,7 @@ public class WebApp {
         this.BasicAuthCfg  = null
         this.JwtAuthCfg    = null
         this.SessionEnabled = false
+        this.PoweredByCfg  = PoweredBy.Default()   // identity headers ON by default
         this.StaticMounts  = new List<Static>()
         this.State         = new Map<string, string>()
         this.StateMu       = Threading.MutexNew()
@@ -141,6 +149,14 @@ public class WebApp {
         this.StaticMounts.Add(s)
         return this
     }
+    // v0.21.0: customize / replace the server-identity advertisement
+    // (X-Powered-By + Server). Pass a tuned PoweredBy — e.g. a custom
+    // value, or only one of the two headers.
+    public WebApp WithPoweredBy(PoweredBy p)               { this.PoweredByCfg = p; return this }
+    // Turn the identity headers OFF entirely (drops the default
+    // "Mosaic (Amalgame)" advertisement — recommended if you'd rather
+    // not fingerprint the stack to clients).
+    public WebApp WithoutPoweredBy()                       { this.PoweredByCfg = PoweredBy.Disabled(); return this }
     // Apply level + file sink on the amalgame-logging facade
     // immediately so subsequent Log.Info/Warn/etc. honor them. The
     // LogConfig is also kept on the WebApp so Handle() can emit the
@@ -352,6 +368,11 @@ public class WebApp {
         }
         if (this.CorsCfg != null) {
             this.CorsCfg.Apply(req, resp)
+        }
+        // v0.21.0: server-identity advertisement, last. No-op when
+        // disabled; handler-set X-Powered-By / Server win.
+        if (this.PoweredByCfg != null) {
+            this.PoweredByCfg.Apply(resp)
         }
         return resp
     }

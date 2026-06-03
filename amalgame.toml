@@ -28,10 +28,10 @@
 
 [package]
 name              = "amalgame-web"
-version           = "0.20.0"
+version           = "0.21.0"
 license           = "Apache-2.0"
-description       = "Mosaic — the Amalgame web framework runtime library. v0.20.0 adds automatic sessions: WithSession(store) loads ctx.Session from the cookie and persists it, across a unifying SessionStore interface (Memory / Redis / SignedCookie). v0.19.0 made auth first-class (WithBasicAuth / WithJwt + Protected() route group). Requires net-http v0.11.1+."
-required-amalgame = ">=0.8.58"
+description       = "Mosaic — the Amalgame web framework runtime library. v0.21.0 advertises the stack by default: every response carries X-Powered-By + Server: Mosaic (Amalgame) (toggle via WithoutPoweredBy() / WithPoweredBy() or the [powered_by] config table). v0.20.0 adds automatic sessions: WithSession(store) loads ctx.Session from the cookie and persists it, across a unifying SessionStore interface (Memory / Redis / SignedCookie). v0.19.0 made auth first-class (WithBasicAuth / WithJwt + Protected() route group). Requires net-http v0.11.1+."
+required-amalgame = ">=0.8.72"
 schema-version    = 1
 
 # Runtime deps on other Amalgame packages. amc >= 0.8.39 auto-pulls
@@ -71,6 +71,7 @@ classes   = [
     "AcmeConfig",
     "TlsBindingConfig",
     "Static",
+    "PoweredBy",
 ]
 header    = "runtime/Amalgame_Web.h"
 namespace = "Amalgame.Web"
@@ -95,6 +96,7 @@ sources   = [
     "jwt_auth.am",
     "oauth2.am",
     "static.am",
+    "powered_by.am",
     "web_app.am",
 ]
 libs      = []
