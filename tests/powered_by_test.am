@@ -1,0 +1,132 @@
+// Unit tests for PoweredBy (v0.21.0).
+//
+// Verifies:
+//   - default instance is ON and stamps both X-Powered-By + Server
+//   - the advertised value is "Mosaic (Amalgame)"
+//   - Disabled() / Disable() emit nothing
+//   - per-header toggles (WithServer/WithXPoweredBy false)
+//   - WithValue customizes the advertised string
+//   - Apply does not overwrite a header the handler already set
+//   - FromMap honors enabled / value / x_powered_by / server, ignores unknown keys
+//   - WebApp wires PoweredBy ON by default; WithoutPoweredBy() drops it
+
+namespace Tests
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.Net.Http
+import Amalgame.Web
+
+public class Program {
+    public static void Main(string[] args) {
+        Console.WriteLine("amalgame-web — PoweredBy tests")
+
+        // ── 1. Default instance stamps both headers ───────────────
+        let def = PoweredBy.Default()
+        let r1 = HttpResponse.New().Text("hi")
+        def.Apply(r1)
+        if (r1.Headers.Get("X-Powered-By") == "Mosaic (Amalgame)"
+            && r1.Headers.Get("Server") == "Mosaic (Amalgame)") {
+            Console.WriteLine("[PASS] default emits both X-Powered-By + Server")
+        } else {
+            Console.WriteLine("[FAIL] default got XPB=" + r1.Headers.Get("X-Powered-By") + " Server=" + r1.Headers.Get("Server"))
+        }
+
+        // ── 2. Disabled() = no-op ─────────────────────────────────
+        let off = PoweredBy.Disabled()
+        let r2 = HttpResponse.New().Text("hi")
+        off.Apply(r2)
+        if (!r2.Headers.Has("X-Powered-By") && !r2.Headers.Has("Server")) {
+            Console.WriteLine("[PASS] Disabled() emits nothing")
+        } else {
+            Console.WriteLine("[FAIL] Disabled() leaked headers")
+        }
+
+        // ── 3. Per-header toggle: Server only ─────────────────────
+        let serverOnly = new PoweredBy().WithXPoweredBy(false)
+        let r3 = HttpResponse.New().Text("hi")
+        serverOnly.Apply(r3)
+        if (!r3.Headers.Has("X-Powered-By") && r3.Headers.Get("Server") == "Mosaic (Amalgame)") {
+            Console.WriteLine("[PASS] WithXPoweredBy(false) leaves only Server")
+        } else {
+            Console.WriteLine("[FAIL] per-header toggle wrong")
+        }
+
+        // ── 4. Custom value ───────────────────────────────────────
+        let custom = new PoweredBy().WithValue("Acme/1.0")
+        let r4 = HttpResponse.New().Text("hi")
+        custom.Apply(r4)
+        if (r4.Headers.Get("X-Powered-By") == "Acme/1.0" && r4.Headers.Get("Server") == "Acme/1.0") {
+            Console.WriteLine("[PASS] WithValue customizes both")
+        } else {
+            Console.WriteLine("[FAIL] WithValue got " + r4.Headers.Get("Server"))
+        }
+
+        // ── 5. Handler-set header wins ────────────────────────────
+        let def2 = PoweredBy.Default()
+        let r5 = HttpResponse.New().Header("Server", "nginx").Text("hi")
+        def2.Apply(r5)
+        if (r5.Headers.Get("Server") == "nginx" && r5.Headers.Get("X-Powered-By") == "Mosaic (Amalgame)") {
+            Console.WriteLine("[PASS] handler-set Server preserved, X-Powered-By still added")
+        } else {
+            Console.WriteLine("[FAIL] handler-wins broken: Server=" + r5.Headers.Get("Server"))
+        }
+
+        // ── 6. FromMap: disable via config ────────────────────────
+        let cfg0 = new Map<string, string>()
+        cfg0.Set("enabled", "false")
+        let p0 = PoweredBy.FromMap(cfg0)
+        let r6 = HttpResponse.New().Text("hi")
+        p0.Apply(r6)
+        if (!r6.Headers.Has("X-Powered-By") && !r6.Headers.Has("Server")) {
+            Console.WriteLine("[PASS] FromMap enabled=false = no-op")
+        } else {
+            Console.WriteLine("[FAIL] FromMap enabled=false leaked headers")
+        }
+
+        // ── 7. FromMap: value + only-server, unknown key ignored ──
+        let cfg1 = new Map<string, string>()
+        cfg1.Set("value", "Mosaic")
+        cfg1.Set("x_powered_by", "false")
+        cfg1.Set("server", "true")
+        cfg1.Set("future_key", "ignore-me")
+        let p1 = PoweredBy.FromMap(cfg1)
+        let r7 = HttpResponse.New().Text("hi")
+        p1.Apply(r7)
+        if (!r7.Headers.Has("X-Powered-By") && r7.Headers.Get("Server") == "Mosaic") {
+            Console.WriteLine("[PASS] FromMap value + per-header toggles + unknown-key tolerance")
+        } else {
+            Console.WriteLine("[FAIL] FromMap compose: X-Powered-By should be absent, Server=" + r7.Headers.Get("Server"))
+        }
+
+        // ── 8. WebApp default ON ──────────────────────────────────
+        let app = WebApp.New()
+            .Get("/", ctx => HttpResponse.New().Text("home"))
+        let req = new HttpRequest()
+        req.Method = "GET"
+        req.Path   = "/"
+        let resp = app.Handle(req)
+        if (resp.Headers.Get("X-Powered-By") == "Mosaic (Amalgame)"
+            && resp.Headers.Get("Server") == "Mosaic (Amalgame)") {
+            Console.WriteLine("[PASS] WebApp advertises by default")
+        } else {
+            Console.WriteLine("[FAIL] WebApp default got XPB=" + resp.Headers.Get("X-Powered-By") + " Server=" + resp.Headers.Get("Server"))
+        }
+
+        // ── 9. WebApp.WithoutPoweredBy() drops it ─────────────────
+        let app2 = WebApp.New()
+            .WithoutPoweredBy()
+            .Get("/", ctx => HttpResponse.New().Text("home"))
+        let req2 = new HttpRequest()
+        req2.Method = "GET"
+        req2.Path   = "/"
+        let resp2 = app2.Handle(req2)
+        if (!resp2.Headers.Has("X-Powered-By") && !resp2.Headers.Has("Server")) {
+            Console.WriteLine("[PASS] WithoutPoweredBy() suppresses both")
+        } else {
+            Console.WriteLine("[FAIL] WithoutPoweredBy() still leaked headers")
+        }
+
+        Console.WriteLine("done")
+    }
+}
