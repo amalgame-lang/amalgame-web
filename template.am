@@ -1,0 +1,238 @@
+// amalgame-web — Template engine (Mustache-like, auto-escaping).
+//
+// Pure Amalgame. Closes the XSS gap left by HttpResponse.Html(), which
+// stores the body verbatim: `{{x}}` HTML-escapes its value by default,
+// so user-controlled data is safe unless the author explicitly opts out
+// with `{{{x}}}` / `{{&x}}`.
+//
+// Scope v0.24.0:
+//   {{key}}        → HtmlEscape(value)          (escaped — the default)
+//   {{{key}}}      → raw value (no escape)       (explicit opt-out)
+//   {{&key}}       → raw value (no escape)       (alias of triple)
+//   {{#key}}…{{/key}}   section: rendered once iff `key` is truthy
+//   {{^key}}…{{/key}}   inverted: rendered iff `key` is falsy
+//   {{! comment }}  dropped
+//   {{>name}}      partial: a registered template inlined here
+//
+// Truthiness over a Map<string,string>: key present AND value not in
+// { "", "false", "0" }. List iteration (a section repeating per row)
+// needs a richer context than Map<string,string>; it lands with a
+// future RenderCtx — documented, not faked here.
+//
+// Load order: amalgame.toml `sources` must list template.am before
+// web_context.am (WebContext.Render returns a Template-rendered body).
+
+namespace Amalgame.Web
+
+import Amalgame.Collections
+import Amalgame.IO
+
+// Bounds partial recursion so a self-referential partial can't loop
+// forever. Generous for real templates, cheap insurance otherwise.
+public class Template {
+    public Source:   string
+    public Partials: Map<string, string>   // name → partial source
+
+    public Template() {
+        this.Source   = ""
+        this.Partials = new Map<string, string>()
+    }
+
+    // ── Construction ────────────────────────────────────────────────
+    public static Template Parse(string src) {
+        var t: Template = new Template()
+        t.Source = src
+        return t
+    }
+
+    public static Template FromFile(string path) {
+        var t: Template = new Template()
+        t.Source = File_ReadAll(path)
+        return t
+    }
+
+    public Template WithPartial(string name, string src) {
+        this.Partials.Set(name, src)
+        return this
+    }
+
+    // ── Rendering ───────────────────────────────────────────────────
+    public string Render(Map<string, string> data) {
+        return this.renderSpan(this.Source, data, 0)
+    }
+
+    public static string RenderString(string src, Map<string, string> data) {
+        var t: Template = Template.Parse(src)
+        return t.Render(data)
+    }
+
+    // HTML-escape & < > " ' / — the last two cover single-quoted
+    // attribute contexts and close </script> style breakouts.
+    public static string HtmlEscape(string s) {
+        var out: string = ""
+        let n: int = String_Length(s)
+        var i: int = 0
+        while (i < n) {
+            let ch: string = String_CharAt1(s, i)
+            if (ch == "&")       { out = out + "&amp;" }
+            else if (ch == "<")  { out = out + "&lt;" }
+            else if (ch == ">")  { out = out + "&gt;" }
+            else if (ch == "\"") { out = out + "&quot;" }
+            else if (ch == "'")  { out = out + "&#39;" }
+            else if (ch == "/")  { out = out + "&#47;" }
+            else                 { out = out + ch }
+            i = i + 1
+        }
+        return out
+    }
+
+    // ── Internals ───────────────────────────────────────────────────
+
+    // Render one span of template text. `depth` bounds partial recursion.
+    string renderSpan(string src, Map<string, string> data, int depth) {
+        var out: string = ""
+        let n: int = String_Length(src)
+        var i: int = 0
+        while (i < n) {
+            let open: int = Template.idxFrom(src, "{{", i)
+            if (open < 0) {
+                out = out + String_Substring(src, i, n - i)
+                i = n
+            } else {
+                // literal text before the tag
+                if (open > i) { out = out + String_Substring(src, i, open - i) }
+
+                // triple {{{ … }}} → raw
+                let isTriple: bool = (open + 2 < n) && (String_CharAt1(src, open + 2) == "{")
+                if (isTriple) {
+                    let tclose: int = Template.idxFrom(src, "}}}", open + 3)
+                    if (tclose < 0) {
+                        out = out + String_Substring(src, open, n - open)
+                        i = n
+                    } else {
+                        let key: string = String_Trim(String_Substring(src, open + 3, tclose - (open + 3)))
+                        out = out + Template.valueOf(data, key)
+                        i = tclose + 3
+                    }
+                } else {
+                    let close: int = Template.idxFrom(src, "}}", open + 2)
+                    if (close < 0) {
+                        out = out + String_Substring(src, open, n - open)
+                        i = n
+                    } else {
+                        let inner: string = String_Trim(String_Substring(src, open + 2, close - (open + 2)))
+                        let tagEnd: int = close + 2
+                        let sigil: string = ""
+                        if (String_Length(inner) > 0) { sigil = String_CharAt1(inner, 0) }
+
+                        if (sigil == "!") {
+                            // comment — drop
+                            i = tagEnd
+                        } else if (sigil == "&") {
+                            let key: string = String_Trim(String_Substring(inner, 1, String_Length(inner) - 1))
+                            out = out + Template.valueOf(data, key)
+                            i = tagEnd
+                        } else if (sigil == ">") {
+                            let name: string = String_Trim(String_Substring(inner, 1, String_Length(inner) - 1))
+                            if (depth < 32 && this.Partials.Has(name)) {
+                                out = out + this.renderSpan(this.Partials.Get(name), data, depth + 1)
+                            }
+                            i = tagEnd
+                        } else if (sigil == "#" || sigil == "^") {
+                            let key: string = String_Trim(String_Substring(inner, 1, String_Length(inner) - 1))
+                            let closeOpen: int = this.findMatchingClose(src, key, tagEnd)
+                            if (closeOpen < 0) {
+                                // malformed — treat the open tag as consumed, emit nothing
+                                i = tagEnd
+                            } else {
+                                let block: string = String_Substring(src, tagEnd, closeOpen - tagEnd)
+                                let closeEnd: int = Template.idxFrom(src, "}}", closeOpen + 2)
+                                var after: int = n
+                                if (closeEnd >= 0) { after = closeEnd + 2 }
+                                let truthy: bool = Template.isTruthy(data, key)
+                                var render: bool = false
+                                if (sigil == "#" && truthy)  { render = true }
+                                if (sigil == "^" && !truthy) { render = true }
+                                if (render) { out = out + this.renderSpan(block, data, depth) }
+                                i = after
+                            }
+                        } else if (sigil == "/") {
+                            // stray close — skip
+                            i = tagEnd
+                        } else {
+                            // normal {{key}} — escaped
+                            out = out + Template.HtmlEscape(Template.valueOf(data, inner))
+                            i = tagEnd
+                        }
+                    }
+                }
+            }
+        }
+        return out
+    }
+
+    // Find the matching "{{/key}}" for an already-consumed "{{#key}}" /
+    // "{{^key}}", honoring nesting of same-named sections. Returns the
+    // index of the closing tag's "{{", or -1 if unbalanced.
+    int findMatchingClose(string src, string key, int from) {
+        var depth: int = 1
+        let n: int = String_Length(src)
+        var i: int = from
+        while (i < n) {
+            let open: int = Template.idxFrom(src, "{{", i)
+            if (open < 0) { return -1 }
+            let isTriple: bool = (open + 2 < n) && (String_CharAt1(src, open + 2) == "{")
+            if (isTriple) {
+                let tclose: int = Template.idxFrom(src, "}}}", open + 3)
+                if (tclose < 0) { return -1 }
+                i = tclose + 3
+            } else {
+                let close: int = Template.idxFrom(src, "}}", open + 2)
+                if (close < 0) { return -1 }
+                let inner: string = String_Trim(String_Substring(src, open + 2, close - (open + 2)))
+                let tagEnd: int = close + 2
+                var sigil: string = ""
+                if (String_Length(inner) > 0) { sigil = String_CharAt1(inner, 0) }
+                if (sigil == "#" || sigil == "^") {
+                    let k: string = String_Trim(String_Substring(inner, 1, String_Length(inner) - 1))
+                    if (k == key) { depth = depth + 1 }
+                } else if (sigil == "/") {
+                    let k: string = String_Trim(String_Substring(inner, 1, String_Length(inner) - 1))
+                    if (k == key) {
+                        depth = depth - 1
+                        if (depth == 0) { return open }
+                    }
+                }
+                i = tagEnd
+            }
+        }
+        return -1
+    }
+
+    // value(data, key): "" when absent.
+    static string valueOf(Map<string, string> data, string key) {
+        if (data.Has(key)) { return data.Get(key) }
+        return ""
+    }
+
+    // truthy: present AND not "", "false", "0".
+    static bool isTruthy(Map<string, string> data, string key) {
+        if (!data.Has(key)) { return false }
+        let v: string = data.Get(key)
+        if (v == "")      { return false }
+        if (v == "false") { return false }
+        if (v == "0")     { return false }
+        return true
+    }
+
+    // indexOf `sub` in `s` starting at `start` (String_IndexOf is from 0).
+    static int idxFrom(string s, string sub, int start) {
+        let n: int = String_Length(s)
+        if (start <= 0) { return String_IndexOf(s, sub) }
+        if (start >= n) { return -1 }
+        let tail: string = String_Substring(s, start, n - start)
+        let r: int = String_IndexOf(tail, sub)
+        if (r < 0) { return -1 }
+        return start + r
+    }
+}
