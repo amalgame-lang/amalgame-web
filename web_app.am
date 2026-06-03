@@ -76,6 +76,15 @@ public class WebApp {
     // configured fails closed (401). See dispatch()'s auth step.
     public BasicAuthCfg:    BasicAuth         // null = no Basic auth
     public JwtAuthCfg:      JwtAuth           // null = no Bearer/JWT auth
+    // v0.20.0: session store (any SessionStore — Memory / Redis /
+    // SignedCookie). When enabled, the pipeline loads ctx.Session from
+    // the request cookie before the handler and persists it (backend +
+    // Set-Cookie) afterwards. An amc interface value is a fat
+    // (itab+data) value, not a nullable pointer — so a separate
+    // SessionEnabled flag gates it rather than a null check, and the
+    // field is only ever read when the flag is true.
+    public SessionCfg:      SessionStore
+    public SessionEnabled:  bool
     // v0.13.0: ordered list of Static mounts. Checked between
     // CSRF validation and the router on every request — first
     // mount whose prefix matches handles the response. Static
@@ -102,6 +111,7 @@ public class WebApp {
         this.Logging       = null
         this.BasicAuthCfg  = null
         this.JwtAuthCfg    = null
+        this.SessionEnabled = false
         this.StaticMounts  = new List<Static>()
         this.State         = new Map<string, string>()
         this.StateMu       = Threading.MutexNew()
@@ -119,6 +129,10 @@ public class WebApp {
     // API + Basic for a curl-friendly admin endpoint).
     public WebApp WithBasicAuth(BasicAuth ba)              { this.BasicAuthCfg = ba; return this }
     public WebApp WithJwt(JwtAuth ja)                      { this.JwtAuthCfg   = ja; return this }
+    // v0.20.0: enable sessions backed by any SessionStore. Handlers
+    // then read/write ctx.Session; the pipeline loads it from the
+    // request cookie and persists it on the response automatically.
+    public WebApp WithSession(SessionStore store)          { this.SessionCfg = store; this.SessionEnabled = true; return this }
     // v0.13.0: register a static-file mount. Order matters —
     // mounts are checked first-to-last on every request, so
     // declare more-specific prefixes ("/assets/v2") before
@@ -306,7 +320,17 @@ public class WebApp {
                 ctx.State.Set(k, this.State.Get(k))
             }
             Threading.MutexUnlock(this.StateMu)
+            // v0.20.0: load the session from the request cookie before
+            // the handler runs, so ctx.Session is live for read/write.
+            if (this.SessionEnabled) {
+                ctx.Session = this.SessionCfg.LoadSession(req)
+            }
             resp = m.Route.Handler(ctx)
+            // Persist any handler mutations (backend write + Set-Cookie)
+            // before the response-side middlewares stamp the rest.
+            if (this.SessionEnabled) {
+                this.SessionCfg.SaveSession(ctx.Session, resp)
+            }
         }
 
         return this.applyResponseMiddlewares(req, resp)
