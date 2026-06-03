@@ -45,7 +45,7 @@ import Amalgame.Crypto
 import Amalgame.Random
 import Amalgame.Net.Http
 
-public class SignedCookieSessionStore {
+public class SignedCookieSessionStore implements SessionStore {
     public Secret:         string       // HMAC key OR AES key seed
     public Encrypted:      bool         // v0.8.5: AES-256-GCM mode
     public CookieName:     string
@@ -148,6 +148,26 @@ public class SignedCookieSessionStore {
         let session = new Session("cookie")
         session.Data = SignedCookieSessionStore.DeserializeData(payload)
         return session
+    }
+
+    // ── SessionStore (v0.20.0 pipeline integration) ───
+    // Stateless: decode the cookie payload into a Session, or hand
+    // back a fresh empty one when the cookie is absent / tampered /
+    // expired. The "cookie" id is a sentinel — this store keys
+    // nothing server-side.
+    public Session LoadSession(HttpRequest req) {
+        let raw: string = req.Cookie(this.CookieName)
+        if (String_Length(raw) > 0) {
+            let decoded: Session = this.Decode(raw)
+            if (decoded != null) { return decoded }
+        }
+        return new Session("cookie")
+    }
+
+    // Re-encode the (possibly mutated) session into the cookie. No
+    // backend write — the cookie IS the storage.
+    public void SaveSession(Session s, HttpResponse resp) {
+        resp.SetCookie(this.MakeCookie(s))
     }
 
     // ── MakeCookie — wraps Encode in a Cookie object ─

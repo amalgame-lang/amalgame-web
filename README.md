@@ -222,6 +222,39 @@ store.Destroy("session_abc_123")
 Session ids should be 256-bit random tokens in production (use
 `amalgame-random` once available; `tests/` shows the test-id pattern).
 
+### Automatic sessions (v0.20.0)
+
+The snippet above is the manual API. In a `WebApp`, wire a store with
+`WithSession(store)` and the pipeline does the cookie plumbing for you:
+it loads `ctx.Session` from the request cookie before the handler and
+persists it (backend write + `Set-Cookie`) afterwards.
+
+```amalgame
+let app = WebApp.New()
+    .WithSession(new SignedCookieSessionStore(Env_Get("SESSION_SECRET")))
+    .Get("/login", (ctx: WebContext) => {
+        ctx.Session.Set("uid", "42")          // persisted automatically
+        return HttpResponse.New().Text("ok")
+    })
+    .Get("/me", (ctx: WebContext) =>
+        HttpResponse.New().Text("uid=" + ctx.Session.Get("uid")))
+```
+
+`WithSession` accepts any **`SessionStore`** — the interface implemented
+by all three stores, so you swap storage without touching handlers:
+
+- **`MemorySessionStore`** — dev / single process. Fresh visitors get a
+  crypto-random id (`Session.NewId()`), stored in-process.
+- **`RedisSessionStore`** — multi-node, survives restarts. Same id model,
+  persisted to Redis with a TTL.
+- **`SignedCookieSessionStore`** — stateless: the (optionally AES-GCM
+  encrypted) cookie *is* the storage. Zero ops, scales horizontally.
+
+`ctx.Session` is never null when sessions are enabled — returning
+visitors get their existing session, everyone else a fresh empty one.
+`SessionStore` exposes exactly two pipeline operations:
+`LoadSession(req) -> Session` and `SaveSession(session, resp)`.
+
 ## SecurityHeaders
 
 Response-side hardening. Defaults are *off* — start from a preset

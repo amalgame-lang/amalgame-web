@@ -41,7 +41,7 @@ import Amalgame.Database.NoSQL.Redis
 import Amalgame.Threading
 import Amalgame.Net.Http
 
-public class RedisSessionStore {
+public class RedisSessionStore implements SessionStore {
     public Host:           string
     public Port:           int
     public KeyPrefix:      string
@@ -187,6 +187,26 @@ public class RedisSessionStore {
         }
         Threading.MutexUnlock(this.Mu)
         return ok
+    }
+
+    // ── SessionStore (v0.20.0 pipeline integration) ───
+    // Read the cookie's id, fetch from Redis; mint + persist a fresh
+    // session when absent (or when Redis is down and Find returns
+    // null — fail-open to a new anonymous session rather than 500).
+    public Session LoadSession(HttpRequest req) {
+        let id: string = req.Cookie(this.CookieName)
+        if (String_Length(id) > 0) {
+            let existing: Session = this.Find(id)
+            if (existing != null) { return existing }
+        }
+        return this.Create(Session.NewId())
+    }
+
+    // Write the (mutated) session back to Redis with its TTL and
+    // stamp the id cookie on the response.
+    public void SaveSession(Session s, HttpResponse resp) {
+        this.Save(s)
+        resp.SetCookie(this.MakeCookie(s.Id))
     }
 
     // Remove a session. No-op if Redis is down.
