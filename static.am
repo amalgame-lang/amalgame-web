@@ -52,6 +52,7 @@ import Amalgame.Collections
 import Amalgame.String
 import Amalgame.IO
 import Amalgame.Net.Http
+import Amalgame.DateTime
 
 public class Static {
     public Prefix:        string  // URL prefix, normalized to start with "/" and NOT end with "/"
@@ -178,33 +179,144 @@ public class Static {
         if (req.Method != "GET" && req.Method != "HEAD") {
             return HttpResponse.New().Status(405).Text("Method Not Allowed")
         }
-        // ETag = "size-mtime" decimal. Quoted per RFC 7232.
-        let size: int = File_Size(normalized)
-        let mtime: int = File_Mtime(normalized)
+        // Content-Type from the request path's extension (NOT the
+        // served file — a .gz variant must still report the original
+        // type).
+        let ct: string = Static.MimeByExtension(Path_GetExtension(normalized))
+        let rangeH: string = req.Header("range")
+        let ae: string = String_ToLower(req.Header("accept-encoding"))
+
+        // Representation selection: when the client accepts gzip and a
+        // pre-compressed `<file>.gz` sits next to the asset, serve that
+        // (skip for Range requests — ranging a gzip stream is messy).
+        var servePath: string = normalized
+        var useGz: bool = false
+        if (rangeH == "" && String_IndexOf(ae, "gzip") >= 0) {
+            let gzPath: string = normalized + ".gz"
+            if (File_Exists(gzPath) && File_IsFile(gzPath)) {
+                servePath = gzPath
+                useGz = true
+            }
+        }
+
+        // ETag = "size-mtime" + Last-Modified, of the SERVED
+        // representation (identity or .gz), so conditional revalidation
+        // is correct per-representation. Quoted per RFC 7232.
+        let size: int = File_Size(servePath)
+        let mtime: int = File_Mtime(servePath)
         let etag: string = "\"" + String_FromInt(size) + "-" + String_FromInt(mtime) + "\""
-        // Conditional GET — If-None-Match match → 304 with no body
-        // but the same ETag header (browsers re-cache on it).
+        let lastMod: string = DateTime.FormatHttpDate(mtime)
+
+        // Conditional GET — If-None-Match (ETag) then If-Modified-Since.
         let inm: string = req.Header("if-none-match")
         if (inm != "" && inm == etag) {
-            var notMod: HttpResponse = HttpResponse.New().Status(304)
-            notMod.Header("ETag", etag)
-            if (this.CacheMaxAge > 0) {
-                notMod.Header("Cache-Control", "public, max-age=" + String_FromInt(this.CacheMaxAge))
-            }
-            return notMod
+            return this.notModified(etag, lastMod)
         }
+        let ims: string = req.Header("if-modified-since")
+        if (ims != "") {
+            let imsSecs: int = DateTime.ParseHttpDate(ims)
+            if (imsSecs >= 0 && mtime <= imsSecs) {
+                return this.notModified(etag, lastMod)
+            }
+        }
+
+        // Range request (identity only — useGz is false here). 206 on a
+        // satisfiable single range, 416 when unsatisfiable.
+        if (!useGz && rangeH != "") {
+            let rs: List<int> = Static.rangeSpec(rangeH, size)
+            let mode: int = rs.Get(0)
+            if (mode == 2) {
+                var r416: HttpResponse = HttpResponse.New().Status(416)
+                r416.Header("Content-Range", "bytes */" + String_FromInt(size))
+                r416.Header("Accept-Ranges", "bytes")
+                return r416
+            }
+            if (mode == 1) {
+                let off: int = rs.Get(1)
+                let len: int = rs.Get(2)
+                let endIdx: int = off + len - 1
+                var r206: HttpResponse = HttpResponse.New().Status(206)
+                r206.Header("Content-Type", ct)
+                r206.Header("ETag", etag)
+                r206.Header("Last-Modified", lastMod)
+                r206.Header("Accept-Ranges", "bytes")
+                r206.Header("Content-Range",
+                    "bytes " + String_FromInt(off) + "-" + String_FromInt(endIdx) + "/" + String_FromInt(size))
+                r206.FileRange(servePath, off, len)
+                return r206
+            }
+            // mode 0 (malformed / multi-range) → fall through to 200.
+        }
+
         // 200 OK — bind file by path so WriteToH1Conn uses the
-        // binary-safe RespondFile entry. MIME from extension.
-        let ct: string = Static.MimeByExtension(Path_GetExtension(normalized))
+        // binary-safe RespondFile entry.
         var resp: HttpResponse = HttpResponse.New()
             .Status(200)
             .Header("Content-Type", ct)
             .Header("ETag", etag)
-            .File(normalized)
+            .File(servePath)
+        resp.Header("Last-Modified", lastMod)
+        resp.Header("Accept-Ranges", "bytes")
+        if (useGz) {
+            resp.Header("Content-Encoding", "gzip")
+            resp.Header("Vary", "Accept-Encoding")
+        }
         if (this.CacheMaxAge > 0) {
             resp.Header("Cache-Control", "public, max-age=" + String_FromInt(this.CacheMaxAge))
         }
         return resp
+    }
+
+    // 304 Not Modified carrying the validators the client re-caches on.
+    HttpResponse notModified(string etag, string lastMod) {
+        var nm: HttpResponse = HttpResponse.New().Status(304)
+        nm.Header("ETag", etag)
+        nm.Header("Last-Modified", lastMod)
+        if (this.CacheMaxAge > 0) {
+            nm.Header("Cache-Control", "public, max-age=" + String_FromInt(this.CacheMaxAge))
+        }
+        return nm
+    }
+
+    // Parse a single-range `Range: bytes=…` header against a known
+    // file size. Returns [mode, off, len] where mode is 0 = no/ignored
+    // range (serve full 200), 1 = satisfiable (206), 2 = unsatisfiable
+    // (416). Multi-range ("a-b,c-d") is unsupported → mode 0 (full).
+    static List<int> rangeSpec(string h, int size) {
+        var out: List<int> = new List<int>()
+        if (h == "" || !String_StartsWith(h, "bytes=")) {
+            out.Add(0); out.Add(0); out.Add(0); return out
+        }
+        let spec: string = String_Substring(h, 6, String_Length(h) - 6)
+        if (String_IndexOf(spec, ",") >= 0) {
+            out.Add(0); out.Add(0); out.Add(0); return out
+        }
+        let dash: int = String_IndexOf(spec, "-")
+        if (dash < 0) {
+            out.Add(2); out.Add(0); out.Add(0); return out
+        }
+        let startS: string = String_Trim(String_Substring(spec, 0, dash))
+        let endS: string = String_Trim(String_Substring(spec, dash + 1, String_Length(spec) - dash - 1))
+        var off: int = 0
+        var endIdx: int = 0
+        if (startS == "") {
+            // suffix form: last N bytes
+            if (endS == "") { out.Add(2); out.Add(0); out.Add(0); return out }
+            let n: int = String_ToInt(endS)
+            if (n <= 0) { out.Add(2); out.Add(0); out.Add(0); return out }
+            if (n >= size) { off = 0 } else { off = size - n }
+            endIdx = size - 1
+        } else {
+            off = String_ToInt(startS)
+            if (endS == "") { endIdx = size - 1 } else { endIdx = String_ToInt(endS) }
+            if (endIdx >= size) { endIdx = size - 1 }
+        }
+        if (off < 0 || off > endIdx || off >= size) {
+            out.Add(2); out.Add(0); out.Add(0); return out
+        }
+        let len: int = endIdx - off + 1
+        out.Add(1); out.Add(off); out.Add(len)
+        return out
     }
 
     // ── Builders for config-file driven instantiation ───────────────
