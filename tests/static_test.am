@@ -198,6 +198,98 @@ public class Program {
             Console.WriteLine("[FAIL] ETag drifted: " + etagFirst + " vs " + rHit2.Headers.Get("ETag"))
         }
 
+        // ── 11b. Last-Modified + Accept-Ranges on 200 (v0.27.0) ──
+        if (rHit.Headers.Has("Last-Modified") && rHit.Headers.Get("Accept-Ranges") == "bytes") {
+            Console.WriteLine("[PASS] 200 carries Last-Modified + Accept-Ranges")
+        } else {
+            Console.WriteLine("[FAIL] missing Last-Modified/Accept-Ranges")
+        }
+
+        // ── 11c. If-Modified-Since (future) → 304 ────────────────
+        let reqIms = new HttpRequest()
+        reqIms.Method = "GET"
+        reqIms.Path = "/assets/hello.txt"
+        reqIms.Headers.Set("if-modified-since", "Thu, 01 Jan 2099 00:00:00 GMT")
+        let rIms = st.Serve(reqIms)
+        if (rIms != null && rIms.StatusCode == 304) {
+            Console.WriteLine("[PASS] If-Modified-Since future → 304")
+        } else {
+            Console.WriteLine("[FAIL] If-Modified-Since 304 got: " + String_FromInt(rIms.StatusCode))
+        }
+
+        // ── 11d. Range bytes=0-4 → 206 (hello.txt is 19 bytes) ───
+        let reqR1 = new HttpRequest()
+        reqR1.Method = "GET"
+        reqR1.Path = "/assets/hello.txt"
+        reqR1.Headers.Set("range", "bytes=0-4")
+        let rR1 = st.Serve(reqR1)
+        if (rR1 != null && rR1.StatusCode == 206
+            && rR1.HasRange && rR1.RangeOff == 0 && rR1.RangeLen == 5
+            && rR1.Headers.Get("Content-Range") == "bytes 0-4/19") {
+            Console.WriteLine("[PASS] Range 0-4 → 206 bytes 0-4/19")
+        } else {
+            Console.WriteLine("[FAIL] Range 0-4 got: status=" + String_FromInt(rR1.StatusCode)
+                + " cr=" + rR1.Headers.Get("Content-Range"))
+        }
+
+        // ── 11e. Suffix range bytes=-6 → last 6 bytes ────────────
+        let reqR2 = new HttpRequest()
+        reqR2.Method = "GET"
+        reqR2.Path = "/assets/hello.txt"
+        reqR2.Headers.Set("range", "bytes=-6")
+        let rR2 = st.Serve(reqR2)
+        if (rR2 != null && rR2.StatusCode == 206
+            && rR2.RangeOff == 13 && rR2.RangeLen == 6
+            && rR2.Headers.Get("Content-Range") == "bytes 13-18/19") {
+            Console.WriteLine("[PASS] Range -6 → 206 bytes 13-18/19")
+        } else {
+            Console.WriteLine("[FAIL] Range -6 got: status=" + String_FromInt(rR2.StatusCode)
+                + " cr=" + rR2.Headers.Get("Content-Range"))
+        }
+
+        // ── 11f. Unsatisfiable range → 416 ───────────────────────
+        let reqR3 = new HttpRequest()
+        reqR3.Method = "GET"
+        reqR3.Path = "/assets/hello.txt"
+        reqR3.Headers.Set("range", "bytes=100-200")
+        let rR3 = st.Serve(reqR3)
+        if (rR3 != null && rR3.StatusCode == 416
+            && rR3.Headers.Get("Content-Range") == "bytes */19") {
+            Console.WriteLine("[PASS] unsatisfiable range → 416")
+        } else {
+            Console.WriteLine("[FAIL] 416 got: status=" + String_FromInt(rR3.StatusCode))
+        }
+
+        // ── 11g. Pre-compressed .gz selection ────────────────────
+        File_WriteAll(fixDir + "/style.css", "body{color:red}")
+        File_WriteAll(fixDir + "/style.css.gz", "FAKEGZIPBYTES")
+        let reqGz = new HttpRequest()
+        reqGz.Method = "GET"
+        reqGz.Path = "/assets/style.css"
+        reqGz.Headers.Set("accept-encoding", "gzip, deflate")
+        let rGz = st.Serve(reqGz)
+        if (rGz != null && rGz.StatusCode == 200
+            && rGz.Headers.Get("Content-Encoding") == "gzip"
+            && rGz.Headers.Get("Content-Type") == "text/css; charset=utf-8"
+            && String_EndsWith(rGz.FilePath, "style.css.gz")) {
+            Console.WriteLine("[PASS] .gz variant served with Content-Encoding gzip")
+        } else {
+            Console.WriteLine("[FAIL] .gz got: status=" + String_FromInt(rGz.StatusCode)
+                + " ce=" + rGz.Headers.Get("Content-Encoding") + " path=" + rGz.FilePath)
+        }
+        // Without Accept-Encoding gzip → identity file served.
+        let reqNoGz = new HttpRequest()
+        reqNoGz.Method = "GET"
+        reqNoGz.Path = "/assets/style.css"
+        let rNoGz = st.Serve(reqNoGz)
+        if (rNoGz != null && rNoGz.StatusCode == 200
+            && !rNoGz.Headers.Has("Content-Encoding")
+            && String_EndsWith(rNoGz.FilePath, "style.css")) {
+            Console.WriteLine("[PASS] no Accept-Encoding → identity file")
+        } else {
+            Console.WriteLine("[FAIL] identity got ce=" + rNoGz.Headers.Get("Content-Encoding"))
+        }
+
         // ── 12. Nested file resolves correctly ───────────────────
         let reqNested = new HttpRequest()
         reqNested.Method = "GET"
