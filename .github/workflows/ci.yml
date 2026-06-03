@@ -15,7 +15,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        amc-tag: [v0.8.58]
+        # Test against the declared required-amalgame floor (v0.8.72):
+        # v0.20.0's SessionStore is an amc interface value, which needs
+        # interface dispatch (landed v0.8.72) — the old v0.8.58 floor
+        # segfaulted on WithSession and had been red since v0.20.0.
+        amc-tag: [v0.8.72]
     services:
       # v0.8.4+: redis_session_test exercises RedisSessionStore
       # against a live RESP2 server. The test SKIPs cleanly when no
