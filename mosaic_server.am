@@ -34,6 +34,7 @@ import Amalgame.Net.Http
 
 public class MosaicServer {
     public Sites:        Map<string, WebApp>   // bare host → app
+    public Handlers:     Map<string, Closure<HttpRequest, HttpResponse>>  // bare host → raw handler (e.g. reverse proxy)
     public Domains:      List<string>          // ordered: SNI, [0] = default cert
     public CertDir:      string                // <CertDir>/<domain>/{fullchain,privkey}.pem
     public WwwCanonical: bool                  // www.x → x (308)
@@ -41,6 +42,7 @@ public class MosaicServer {
 
     public MosaicServer() {
         this.Sites        = new Map<string, WebApp>()
+        this.Handlers     = new Map<string, Closure<HttpRequest, HttpResponse>>()
         this.Domains      = new List<string>()
         this.CertDir      = "/var/mosaic/certs"
         this.WwwCanonical = true
@@ -79,6 +81,56 @@ public class MosaicServer {
     // `/` → index.html, `/<slug>` → <slug>.html, else 404).
     public MosaicServer AddStaticSite(List<string> hosts, string dir) {
         return this.AddSite(hosts, MosaicServer.BuildStaticApp(dir))
+    }
+
+    // Bind a raw per-request handler (HttpRequest → HttpResponse) to one
+    // or more hosts. This is how non-WebApp sites — most importantly a
+    // reverse proxy / load balancer — plug into the same Host dispatch,
+    // SNI and :80→:443 machinery without amalgame-web taking a hard
+    // dependency on amalgame-net-proxy: the caller builds the closure
+    // (e.g. `req => myReverseProxy.Handle(req)`) and mounts it here.
+    // Handlers win over WebApp sites for the same host. Each non-`www.`
+    // host is registered as a domain (for SNI + ACME), like AddSite.
+    public MosaicServer AddHandler(List<string> hosts, Closure<HttpRequest, HttpResponse> handler) {
+        let n: int = hosts.Count()
+        for i in 0..n {
+            let h: string = hosts.Get(i)
+            this.Handlers.Set(h, handler)
+            if (!this.isWwwAlias(h) && !this.Sites.Has(h)) {
+                this.Domains.Add(h)
+            }
+        }
+        return this
+    }
+
+    // True when `bareHost` resolves to a site or a raw handler.
+    public bool Knows(string bareHost) {
+        return this.Sites.Has(bareHost) || this.Handlers.Has(bareHost)
+    }
+
+    // Resolve a request for `host` → response. Raw handlers (reverse
+    // proxy / custom apps) take precedence over WebApp sites; `www.`
+    // folds to the apex when WwwCanonical; unknown host → 404.
+    public HttpResponse Dispatch(string host, HttpRequest req) {
+        var h: string = host
+        let colon: int = String_IndexOf(h, ":")
+        if (colon >= 0) { h = String_Substring(h, 0, colon) }
+        if (this.Handlers.Has(h)) {
+            let hf: Closure<HttpRequest, HttpResponse> = this.Handlers.Get(h)
+            return hf(req)
+        }
+        if (this.WwwCanonical && this.isWwwAlias(h)) {
+            let bare: string = String_Substring(h, 4, String_Length(h) - 4)
+            if (this.Handlers.Has(bare)) {
+                let hb: Closure<HttpRequest, HttpResponse> = this.Handlers.Get(bare)
+                return hb(req)
+            }
+        }
+        let app: WebApp = this.Pick(host)
+        if (app == null) {
+            return HttpResponse.New().Status(404).Text("Unknown host: " + host)
+        }
+        return app.Handle(req)
     }
 
     public static WebApp BuildStaticApp(string dir) {
@@ -130,14 +182,8 @@ public class MosaicServer {
         let router = this
         let handler = conn => {
             let host: string = H1Conn.Header(conn, "host")
-            let app: WebApp = router.Pick(host)
-            var resp: HttpResponse
-            if (app == null) {
-                resp = HttpResponse.New().Status(404).Text("Unknown host: " + host)
-            } else {
-                let req: HttpRequest = HttpRequest.FromH1Conn(conn)
-                resp = app.Handle(req)
-            }
+            let req: HttpRequest = HttpRequest.FromH1Conn(conn)
+            let resp: HttpResponse = router.Dispatch(host, req)
             resp.WriteToH1Conn(conn)
             return 0
         }
@@ -199,20 +245,14 @@ public class MosaicServer {
             // www.<domain> → <domain> (308) when canonicalising.
             if (www && String_Length(hbare) > 4 && String_Substring(hbare, 0, 4) == "www.") {
                 let bare: string = String_Substring(hbare, 4, String_Length(hbare) - 4)
-                if (router.Pick(bare) != null) {
+                if (router.Knows(bare)) {
                     let rr: HttpResponse = HttpResponse.New().Redirect("https://" + bare + path, true)
                     rr.WriteToH1Conn(conn)
                     return 0
                 }
             }
-            let app: WebApp = router.Pick(host)
-            var resp: HttpResponse
-            if (app == null) {
-                resp = HttpResponse.New().Status(404).Text("Unknown host: " + host)
-            } else {
-                let req: HttpRequest = HttpRequest.FromH1Conn(conn)
-                resp = app.Handle(req)
-            }
+            let req: HttpRequest = HttpRequest.FromH1Conn(conn)
+            let resp: HttpResponse = router.Dispatch(host, req)
             resp.WriteToH1Conn(conn)
             return 0
         }
