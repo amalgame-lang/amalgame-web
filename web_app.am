@@ -308,6 +308,9 @@ public class WebApp {
         } else {
             let ctx = new WebContext()
             ctx.Params = m.Params
+            // v0.25.0: hand the handler the raw request so it can reach
+            // the binary body for multipart uploads (ctx.Multipart()).
+            ctx.Req    = req
             // v0.13.4: expose request body + method + path on the
             // context so handlers can read PUT/POST/PATCH payloads
             // (was previously only accessible by re-parsing the
