@@ -1,0 +1,233 @@
+// amalgame-web — MosaicServer (v0.22.0).
+//
+// The "run Mosaic as a server" piece: a multi-site, multi-domain HTTPS
+// front that dispatches by Host to a per-site WebApp — the reusable
+// core behind a config-driven `mosaic serve mosaic.toml` (the Mosaic
+// CLI builds each site's WebApp from TOML, then AddSite()s it here).
+//
+// Generalises the bespoke per-deployment "SiteServer" pattern (one
+// binary, N sites, SNI multi-domain, ACME) into a config-agnostic
+// class. The CLI / app owns *what* each site is (a WebApp with its
+// middleware); MosaicServer owns the *serving* — Host dispatch, TLS +
+// SNI, ACME cert lifecycle, the :80→:443 redirect, graceful shutdown.
+//
+//   let m = MosaicServer.New()
+//       .WithAcme("admin@example.com")
+//       .AddStaticSite(["example.com", "www.example.com"], "/srv/example")
+//       .AddSite(["api.example.com"], myApiWebApp)   // pre-wired middleware
+//   m.EnsureCerts()
+//   m.ServeHttps(443)            // TLS + SNI + :80 redirect, blocks
+//
+// For dev / behind another TLS terminator:
+//   m.Serve(8080)                // plain HTTP, Host dispatch, blocks
+//
+// Reverse-proxy / load-balanced routes (v0.2 amalgame-net-proxy) plug
+// in as a site whose WebApp delegates to a ReverseProxy — wired by the
+// CLI from `[[proxy]]` / `[[upstream]]` TOML (Mosaic server P2).
+
+namespace Amalgame.Web
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.Threading
+import Amalgame.Net.Http
+
+public class MosaicServer {
+    public Sites:        Map<string, WebApp>   // bare host → app
+    public Domains:      List<string>          // ordered: SNI, [0] = default cert
+    public CertDir:      string                // <CertDir>/<domain>/{fullchain,privkey}.pem
+    public WwwCanonical: bool                  // www.x → x (308)
+    public HttpRedirect: bool                  // run a :80 → :443 redirect
+
+    public MosaicServer() {
+        this.Sites        = new Map<string, WebApp>()
+        this.Domains      = new List<string>()
+        this.CertDir      = "/var/mosaic/certs"
+        this.WwwCanonical = true
+        this.HttpRedirect = true
+    }
+
+    public static MosaicServer New() { return new MosaicServer() }
+
+    // ── Configuration (fluent) ───────────────────────
+    // Cert provisioning (ACME / Let's Encrypt) is the caller's job —
+    // run amalgame-tls's AcmeNative.EnsureCert(domain, …) per Domains()
+    // before ServeHttps, writing into <CertDir>/<domain>/. Keeping ACME
+    // out of MosaicServer avoids a hard amalgame-tls class dependency
+    // here and lets the Mosaic CLI / your bootstrap own the cert
+    // lifecycle (renewal timers, staging vs prod, …).
+    public MosaicServer WithCertDir(string d)         { this.CertDir = d; return this }
+    public MosaicServer WithWwwCanonical(bool on)     { this.WwwCanonical = on; return this }
+    public MosaicServer WithHttpRedirect(bool on)     { this.HttpRedirect = on; return this }
+
+    // Bind a fully-configured WebApp (its own middleware) to one or more
+    // hosts. Each host is also registered as a domain (for SNI + ACME),
+    // skipping `www.` aliases when WwwCanonical folds them to the apex.
+    public MosaicServer AddSite(List<string> hosts, WebApp app) {
+        let n: int = hosts.Count()
+        for i in 0..n {
+            let h: string = hosts.Get(i)
+            this.Sites.Set(h, app)
+            if (!this.isWwwAlias(h)) {
+                this.Domains.Add(h)
+            }
+        }
+        return this
+    }
+
+    // Convenience: a plain static site rooted at `dir` (assets by MIME,
+    // `/` → index.html, `/<slug>` → <slug>.html, else 404).
+    public MosaicServer AddStaticSite(List<string> hosts, string dir) {
+        return this.AddSite(hosts, MosaicServer.BuildStaticApp(dir))
+    }
+
+    public static WebApp BuildStaticApp(string dir) {
+        let app: WebApp = WebApp.New()
+        app.WithStatic(Static.New("/", dir))
+        let indexPath: string = dir + "/index.html"
+        app.Get("/", ctx => HttpResponse.New().Html(File.ReadAll(indexPath)))
+        app.Get("/*path", (ctx: WebContext) => {
+            let slug: string = ctx.Param("path")
+            let f: string = dir + "/" + slug + ".html"
+            if (File.Exists(f)) {
+                return HttpResponse.New().Html(File.ReadAll(f))
+            }
+            return HttpResponse.New().Status(404).Html("<h1>404</h1>")
+        })
+        return app
+    }
+
+    // ── Host dispatch ─────────────────────────────────
+    // Strip port; fold `www.` to the apex when WwwCanonical; look up.
+    public WebApp Pick(string host) {
+        var h: string = host
+        let colon: int = String_IndexOf(h, ":")
+        if (colon >= 0) { h = String_Substring(h, 0, colon) }
+        if (this.Sites.Has(h)) { return this.Sites.Get(h) }
+        if (this.WwwCanonical && this.isWwwAlias(h)) {
+            let bare: string = String_Substring(h, 4, String_Length(h) - 4)
+            if (this.Sites.Has(bare)) { return this.Sites.Get(bare) }
+        }
+        return null
+    }
+
+    private bool isWwwAlias(string h) {
+        return String_Length(h) > 4 && String_Substring(h, 0, 4) == "www."
+    }
+
+    // ── Cert path convention ──────────────────────────
+    // <CertDir>/<domain>/{fullchain,privkey}.pem — where the caller's
+    // ACME step (amalgame-tls AcmeNative) is expected to write, and
+    // where ServeHttps reads. DomainList() gives the set to provision.
+    public List<string> DomainList() { return this.Domains }
+
+    public string certPathOf(string domain) { return this.CertDir + "/" + domain + "/fullchain.pem" }
+    public string keyPathOf(string domain)  { return this.CertDir + "/" + domain + "/privkey.pem" }
+
+    // ── Serve: plain HTTP (dev / behind a TLS terminator) ──
+    // Host dispatch on a single :port listener, no TLS. Blocks.
+    public int Serve(int port) {
+        let router = this
+        let handler = conn => {
+            let host: string = H1Conn.Header(conn, "host")
+            let app: WebApp = router.Pick(host)
+            var resp: HttpResponse
+            if (app == null) {
+                resp = HttpResponse.New().Status(404).Text("Unknown host: " + host)
+            } else {
+                let req: HttpRequest = HttpRequest.FromH1Conn(conn)
+                resp = app.Handle(req)
+            }
+            resp.WriteToH1Conn(conn)
+            return 0
+        }
+        return Http1.ServeMt(port, handler)
+    }
+
+    // ── Serve: HTTPS + SNI multi-domain (production) ───
+    // Listens on `port` with the default domain's cert, adds an SNI cert
+    // per other domain, dispatches by Host (with optional www→apex 308),
+    // and (when HttpRedirect) runs a :80 → :443 redirect in a thread.
+    // Keep-alive per connection. Blocks until SIGINT/SIGTERM.
+    public int ServeHttps(int port) {
+        if (this.Domains.Count() == 0) {
+            Console.WriteError("MosaicServer: no domains registered")
+            return 1
+        }
+        let defaultDomain: string = this.Domains.Get(0)
+        let defCert: string = this.certPathOf(defaultDomain)
+        let defKey:  string = this.keyPathOf(defaultDomain)
+
+        Http1.InstallShutdownSignals()
+
+        if (this.HttpRedirect) {
+            let redirectWorker = (_a: int) => {
+                let redirect = conn => {
+                    let host: string = H1Conn.Header(conn, "host")
+                    let path: string = H1Conn.Path(conn)
+                    let rr: HttpResponse = HttpResponse.New().Redirect("https://" + host + path, true)
+                    rr.WriteToH1Conn(conn)
+                    return 0
+                }
+                Http1.Serve(80, redirect)
+                return 0
+            }
+            Threading.ThreadSpawn(redirectWorker, 0)
+        }
+
+        let srv = HttpsH1Server.Listen(port, defCert, defKey, 0)
+        if (!HttpsH1Server.IsListening(srv)) {
+            Console.WriteError("MosaicServer: listen failed on :" + String_FromInt(port)
+                + " (missing cert? need root for <1024?)")
+            return 1
+        }
+        var i = 1
+        while (i < this.Domains.Count()) {
+            let d: string = this.Domains.Get(i)
+            HttpsH1Server.AddSni(srv, d, this.certPathOf(d), this.keyPathOf(d))
+            i = i + 1
+        }
+
+        let router = this
+        let www = this.WwwCanonical
+        let handler = conn => {
+            let host: string = H1Conn.Header(conn, "host")
+            let path: string = H1Conn.Path(conn)
+            var hbare: string = host
+            let hc: int = String_IndexOf(hbare, ":")
+            if (hc >= 0) { hbare = String_Substring(hbare, 0, hc) }
+            // www.<domain> → <domain> (308) when canonicalising.
+            if (www && String_Length(hbare) > 4 && String_Substring(hbare, 0, 4) == "www.") {
+                let bare: string = String_Substring(hbare, 4, String_Length(hbare) - 4)
+                if (router.Pick(bare) != null) {
+                    let rr: HttpResponse = HttpResponse.New().Redirect("https://" + bare + path, true)
+                    rr.WriteToH1Conn(conn)
+                    return 0
+                }
+            }
+            let app: WebApp = router.Pick(host)
+            var resp: HttpResponse
+            if (app == null) {
+                resp = HttpResponse.New().Status(404).Text("Unknown host: " + host)
+            } else {
+                let req: HttpRequest = HttpRequest.FromH1Conn(conn)
+                resp = app.Handle(req)
+            }
+            resp.WriteToH1Conn(conn)
+            return 0
+        }
+
+        while (HttpsH1Server.IsListening(srv) && !Http1.IsStopping()) {
+            let conn = HttpsH1Server.Accept(srv)
+            if (conn != null) {
+                let serveWorker = (_a: int) => {
+                    HttpsH1Server.ServeConnOn(conn, handler, 5)
+                    return 0
+                }
+                Threading.ThreadSpawn(serveWorker, 0)
+            }
+        }
+        HttpsH1Server.Close(srv)
+        return 0
+    }
+}
