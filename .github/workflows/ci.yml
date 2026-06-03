@@ -10,8 +10,8 @@ on:
 
 jobs:
   test:
-    name: Test against amc ${{ matrix.amc-tag }}
-    runs-on: ubuntu-latest
+    name: Linux ${{ matrix.arch }} · amc ${{ matrix.amc-tag }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
@@ -20,6 +20,12 @@ jobs:
         # interface dispatch (landed v0.8.72) — the old v0.8.58 floor
         # segfaulted on WithSession and had been red since v0.20.0.
         amc-tag: [v0.8.72]
+        # x86_64 (servers) + arm64 (Raspberry Pi / Apple-silicon CI
+        # runners). Both Linux → same apt + bash run_tests.sh + redis
+        # service path. ubuntu-24.04-arm is the free native arm64 runner.
+        include:
+          - { arch: x86_64, runner: ubuntu-latest }
+          - { arch: arm64,  runner: ubuntu-24.04-arm }
     services:
       # v0.8.4+: redis_session_test exercises RedisSessionStore
       # against a live RESP2 server. The test SKIPs cleanly when no
@@ -128,7 +134,7 @@ jobs:
           TAG="${{ matrix.amc-tag }}"
           VERSION="${TAG#v}"
           curl -sSL -o amc.tar.gz \
-            "https://github.com/amalgame-lang/Amalgame/releases/download/${TAG}/amc-${VERSION}-linux-x86_64.tar.gz"
+            "https://github.com/amalgame-lang/Amalgame/releases/download/${TAG}/amc-${VERSION}-linux-${{ matrix.arch }}.tar.gz"
           mkdir -p $RUNNER_TEMP/amc-install
           tar -xzf amc.tar.gz -C $RUNNER_TEMP/amc-install --strip-components=1
           echo "AMC=$RUNNER_TEMP/amc-install/bin/amc" >> $GITHUB_ENV
@@ -147,3 +153,40 @@ jobs:
           AMALGAME_THREADING: ${{ github.workspace }}/amalgame-threading
           AMALGAME_ASYNC:     ${{ github.workspace }}/amalgame-async
         run: ./tests/run_tests.sh "$AMC"
+
+  # macOS / Windows — best-effort toolchain smoke. The full test runner
+  # (tests/run_tests.sh) is Linux-only today: it shells apt + hardcodes
+  # the gcc link flags for libssl / libnghttp2 / libgc with no per-OS
+  # prefix handling. Porting it (brew prefixes on macOS, an MSYS2 bash
+  # toolchain on Windows) is tracked separately. Until then we at least
+  # prove the released amc binary runs on these platforms. Non-blocking
+  # (continue-on-error) so the matrix advertises the targets without
+  # gating the build on the not-yet-ported runner.
+  smoke-other-os:
+    name: ${{ matrix.label }} · amc smoke (best-effort)
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: macOS arm64,    runner: macos-latest,   amc_os: macos-arm64,    ext: tar.gz }
+          - { label: Windows x86_64, runner: windows-latest, amc_os: windows-x86_64, ext: zip }
+    steps:
+      - name: Download + run amc ${{ matrix.amc_os }}
+        shell: bash
+        run: |
+          set -e
+          TAG="v0.8.72"
+          VERSION="${TAG#v}"
+          URL="https://github.com/amalgame-lang/Amalgame/releases/download/${TAG}/amc-${VERSION}-${{ matrix.amc_os }}.${{ matrix.ext }}"
+          curl -sSL -o amc-archive "$URL"
+          mkdir -p amc-install
+          if [ "${{ matrix.ext }}" = "zip" ]; then
+            unzip -q amc-archive -d amc-install
+          else
+            tar -xzf amc-archive -C amc-install --strip-components=1
+          fi
+          AMC="$(find amc-install -name 'amc' -o -name 'amc.exe' | head -1)"
+          echo "amc binary: $AMC"
+          "$AMC" --version
