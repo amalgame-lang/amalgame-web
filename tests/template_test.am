@@ -1,0 +1,112 @@
+// Unit tests for Template (v0.24.0) — Mustache-like, auto-escaping.
+//
+// Verifies: HtmlEscape; escaped vs raw interpolation; truthy /
+// inverted / nested sections; comments; partials; missing keys.
+//
+// NOTE: amc treats `{…}` inside string literals as interpolation, so
+// template sources here are assembled from LB ("{{") / RB ("}}") built
+// from codepoints — never written as brace literals. Real apps load
+// templates from files (File_ReadAll), which is runtime data and never
+// hits amc's literal interpolation, so this dance is test-only.
+
+namespace Tests
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.Net.Http
+import Amalgame.Web
+
+public class Program {
+    // Returns 1 on failure, 0 on pass (caller accumulates — amc has no
+    // static mutable class fields).
+    static int check(string label, string got, string want) {
+        if (got == want) {
+            Console.WriteLine("[PASS] " + label)
+            return 0
+        }
+        Console.WriteLine("[FAIL] " + label + " — got <" + got + "> want <" + want + ">")
+        return 1
+    }
+
+    public static void Main(string[] args) {
+        Console.WriteLine("amalgame-web — Template tests")
+        var failed: int = 0
+
+        // Brace tokens (avoid amc string interpolation on '{').
+        let LB:  string = String_FromCodepoint(123) + String_FromCodepoint(123)   // "{{"
+        let RB:  string = String_FromCodepoint(125) + String_FromCodepoint(125)   // "}}"
+        let LB3: string = String_FromCodepoint(123) + LB                          // "{{{"
+        let RB3: string = String_FromCodepoint(125) + RB                          // "}}}"
+
+        // ── 1. HtmlEscape ────────────────────────────────────────
+        failed = failed + Program.check("HtmlEscape",
+            Template.HtmlEscape("<a href=\"x\">&'/"),
+            "&lt;a href=&quot;x&quot;&gt;&amp;&#39;&#47;")
+
+        // ── 2. Escaped interpolation (the default) ───────────────
+        var d1: Map<string, string> = new Map<string, string>()
+        d1.Set("name", "<b>")
+        failed = failed + Program.check("escaped interpolation",
+            Template.RenderString("Hello " + LB + "name" + RB, d1),
+            "Hello &lt;b&gt;")
+
+        // ── 3. Raw via triple + & ────────────────────────────────
+        var d2: Map<string, string> = new Map<string, string>()
+        d2.Set("html", "<b>hi</b>")
+        failed = failed + Program.check("raw triple",
+            Template.RenderString(LB3 + "html" + RB3, d2), "<b>hi</b>")
+        failed = failed + Program.check("raw ampersand",
+            Template.RenderString(LB + "&html" + RB, d2), "<b>hi</b>")
+
+        // ── 4. Sections: truthy / falsy ──────────────────────────
+        var on: Map<string, string> = new Map<string, string>()
+        on.Set("show", "true")
+        var off: Map<string, string> = new Map<string, string>()
+        off.Set("show", "")
+        let secShow:  string = LB + "#show" + RB + "yes" + LB + "/show" + RB
+        let invShow:  string = LB + "^show" + RB + "no" + LB + "/show" + RB
+        failed = failed + Program.check("section truthy",
+            Template.RenderString(secShow, on), "yes")
+        failed = failed + Program.check("section falsy",
+            Template.RenderString(secShow, off), "")
+        failed = failed + Program.check("inverted falsy→shows",
+            Template.RenderString(invShow, off), "no")
+        failed = failed + Program.check("inverted truthy→hides",
+            Template.RenderString(invShow, on), "")
+
+        // ── 5. Nested same-name-safe sections ────────────────────
+        let nested: string = LB + "#a" + RB + "A" + LB + "#b" + RB + "B"
+            + LB + "/b" + RB + LB + "/a" + RB
+        var ab: Map<string, string> = new Map<string, string>()
+        ab.Set("a", "1")
+        ab.Set("b", "1")
+        failed = failed + Program.check("nested both on",
+            Template.RenderString(nested, ab), "AB")
+        var aOnly: Map<string, string> = new Map<string, string>()
+        aOnly.Set("a", "1")
+        aOnly.Set("b", "")
+        failed = failed + Program.check("nested inner off",
+            Template.RenderString(nested, aOnly), "A")
+
+        // ── 6. Comments + missing keys ───────────────────────────
+        var empty: Map<string, string> = new Map<string, string>()
+        failed = failed + Program.check("comment dropped",
+            Template.RenderString("x" + LB + "! hi there " + RB + "y", empty), "xy")
+        failed = failed + Program.check("missing key → empty",
+            Template.RenderString("[" + LB + "nope" + RB + "]", empty), "[]")
+
+        // ── 7. Partials (escape applies inside) ──────────────────
+        var pv: Map<string, string> = new Map<string, string>()
+        pv.Set("v", "<x>")
+        let partialSrc: string = "<li>" + LB + "v" + RB + "</li>"
+        var t: Template = Template.Parse(LB + ">row" + RB).WithPartial("row", partialSrc)
+        failed = failed + Program.check("partial + escape",
+            t.Render(pv), "<li>&lt;x&gt;</li>")
+
+        // ── Summary ──────────────────────────────────────────────
+        Console.WriteLine("")
+        Console.WriteLine("failed=" + String_FromInt(failed))
+        if (failed > 0) { Console.WriteLine("[FAIL] template suite") }
+        else { Console.WriteLine("[PASS] template suite") }
+    }
+}
