@@ -1,0 +1,29 @@
+// amalgame-web — SSE route entry (v0.28.0).
+//
+// SSE handlers don't fit the WebApp request→HttpResponse model: they
+// hold the connection open and push frames over time. So they live in
+// a route table parallel to Router (whose handlers are
+// Closure<WebContext, HttpResponse>), keyed by path and dispatched
+// before the normal response pipeline. The handler receives the live
+// SseConn (from amalgame-net-http) and loops Send()-ing until the peer
+// disconnects.
+
+namespace Amalgame.Web
+
+import Amalgame.Net.Http
+
+public class SseRoute {
+    public Path:    string                       // exact match, method GET
+    public Handler: Closure<SseConn, int>
+
+    public SseRoute() {
+        this.Path = ""
+    }
+
+    public static SseRoute New(string path, Closure<SseConn, int> handler) {
+        var r: SseRoute = new SseRoute()
+        r.Path    = path
+        r.Handler = handler
+        return r
+    }
+}
