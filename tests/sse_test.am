@@ -1,0 +1,68 @@
+// Tests for Server-Sent Events routing (v0.28.0).
+//
+// The web test harness builds + links but never opens a socket, so
+// this covers: (1) Sse() route registration via the public SseRoutes
+// table, and (2) a link smoke proving the Closure<SseConn,int> handler
+// shape, SseConn frame methods, and the serveConn dispatch all compile
+// and link through the Serve* launchers. End-to-end byte framing rides
+// on net-http's BeginStream/WriteRaw C smoke.
+
+namespace Tests
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.Net.Http
+import Amalgame.Web
+
+public class Program {
+    public static void Main(string[] args) {
+        Console.WriteLine("amalgame-web — SSE tests")
+        var failed: int = 0
+
+        // ── 1. Registration ──────────────────────────────────────
+        var app: WebApp = new WebApp()
+        app.Sse("/events", sc => { return 0 })
+        app.Sse("/stream", sc => { return 0 })
+        let r0: SseRoute = app.SseRoutes.Get(0)
+        let r1: SseRoute = app.SseRoutes.Get(1)
+        if (app.SseRoutes.Count() == 2
+            && r0.Path == "/events"
+            && r1.Path == "/stream") {
+            Console.WriteLine("[PASS] Sse routes registered")
+        } else {
+            Console.WriteLine("[FAIL] Sse registration")
+            failed = failed + 1
+        }
+
+        // ── 2. Link smoke: real handler body + Serve launchers ───
+        // Never executed (no bind), but must compile + link — proves
+        // Closure<SseConn,int>, SseConn.Send/SendEvent/Comment, and
+        // serveConn dispatch are shipped-correct.
+        if (false) {
+            var app2: WebApp = new WebApp()
+            app2.Sse("/live", sc => {
+                var n: int = 0
+                while (sc.Send("tick " + String_FromInt(n))) {
+                    n = n + 1
+                }
+                return 0
+            })
+            app2.Sse("/named", sc => {
+                sc.SendEvent("ping", "payload", "42")
+                sc.Comment("keepalive")
+                sc.Retry(3000)
+                sc.Close()
+                return 0
+            })
+            app2.Serve(3000)
+            app2.ServeMt(3000)
+            app2.ServeHttps(3443, "cert.pem", "key.pem")
+        }
+        Console.WriteLine("[PASS] SSE handler + Serve launchers link")
+
+        Console.WriteLine("")
+        Console.WriteLine("failed=" + String_FromInt(failed))
+        if (failed > 0) { Console.WriteLine("[FAIL] sse suite") }
+        else { Console.WriteLine("[PASS] sse suite") }
+    }
+}

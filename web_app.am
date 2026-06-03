@@ -102,6 +102,10 @@ public class WebApp {
     // the response chain, turning eligible text bodies into gzipped
     // binary responses.
     public CompressCfg:     Compression
+    // v0.28.0: Server-Sent Events routes — a table parallel to Router
+    // (SSE handlers hold the connection, so they don't return an
+    // HttpResponse). Dispatched in serveConn before the normal pipeline.
+    public SseRoutes:       List<SseRoute>
     public State:           Map<string, string>  // app-level shared state
 
     // v0.9.4: mutex protecting State. WithState() can legitimately be
@@ -125,6 +129,7 @@ public class WebApp {
         this.SessionEnabled = false
         this.PoweredByCfg  = PoweredBy.Default()   // identity headers ON by default
         this.CompressCfg   = null                  // gzip off until WithCompress
+        this.SseRoutes     = new List<SseRoute>()
         this.StaticMounts  = new List<Static>()
         this.State         = new Map<string, string>()
         this.StateMu       = Threading.MutexNew()
@@ -160,6 +165,49 @@ public class WebApp {
     public WebApp WithPoweredBy(PoweredBy p)               { this.PoweredByCfg = p; return this }
     // v0.26.0: enable gzip compression of eligible text responses.
     public WebApp WithCompress(Compression c)             { this.CompressCfg = c; return this }
+
+    // v0.28.0: register a Server-Sent Events route (GET). The handler
+    // receives the live SseConn and loops Send()-ing until the client
+    // disconnects:
+    //   app.Sse("/events", sc => {
+    //     var n = 0
+    //     while (sc.Send("tick " + String_FromInt(n))) { n = n + 1; DateTime.SleepMillis(1000) }
+    //     return 0
+    //   })
+    public WebApp Sse(string path, Closure<SseConn, int> handler) {
+        this.SseRoutes.Add(SseRoute.New(path, handler))
+        return this
+    }
+
+    // Exact-path GET match against the SSE table; null if none.
+    SseRoute matchSse(string method, string path) {
+        if (method != "GET") { return null }
+        let n: int = this.SseRoutes.Count()
+        var i: int = 0
+        while (i < n) {
+            let r: SseRoute = this.SseRoutes.Get(i)
+            if (r.Path == path) { return r }
+            i = i + 1
+        }
+        return null
+    }
+
+    // Per-connection entry shared by every Serve* launcher: SSE routes
+    // hijack the connection (open a stream, run the handler, done);
+    // everything else flows through Handle → WriteToH1Conn.
+    int serveConn(int conn) {
+        let req: HttpRequest = HttpRequest.FromH1Conn(conn)
+        let sr: SseRoute = this.matchSse(req.Method, req.Path)
+        if (sr != null) {
+            let sc: SseConn = SseConn.Open(conn)
+            let h: Closure<SseConn, int> = sr.Handler
+            h(sc)
+            return 0
+        }
+        let resp: HttpResponse = this.Handle(req)
+        resp.WriteToH1Conn(conn)
+        return 0
+    }
     // Turn the identity headers OFF entirely (drops the default
     // "Mosaic (Amalgame)" advertisement — recommended if you'd rather
     // not fingerprint the stack to clients).
@@ -465,20 +513,14 @@ public class WebApp {
     public int Serve(int port) {
         let app = this
         let handler = conn => {
-            let req: HttpRequest = HttpRequest.FromH1Conn(conn)
-            let resp: HttpResponse = app.Handle(req)
-            resp.WriteToH1Conn(conn)
-            return 0
+            return app.serveConn(conn)
         }
         return Http1.Serve(port, handler)
     }
     public int ServeMt(int port) {
         let app = this
         let handler = conn => {
-            let req: HttpRequest = HttpRequest.FromH1Conn(conn)
-            let resp: HttpResponse = app.Handle(req)
-            resp.WriteToH1Conn(conn)
-            return 0
+            return app.serveConn(conn)
         }
         return Http1.ServeMt(port, handler)
     }
@@ -497,20 +539,14 @@ public class WebApp {
     public int ServeHttps(int port, string certPath, string keyPath) {
         let app = this
         let handler = conn => {
-            let req: HttpRequest = HttpRequest.FromH1Conn(conn)
-            let resp: HttpResponse = app.Handle(req)
-            resp.WriteToH1Conn(conn)
-            return 0
+            return app.serveConn(conn)
         }
         return Https.H1Serve(port, certPath, keyPath, handler)
     }
     public int ServeHttpsMt(int port, string certPath, string keyPath) {
         let app = this
         let handler = conn => {
-            let req: HttpRequest = HttpRequest.FromH1Conn(conn)
-            let resp: HttpResponse = app.Handle(req)
-            resp.WriteToH1Conn(conn)
-            return 0
+            return app.serveConn(conn)
         }
         return Https.H1ServeMt(port, certPath, keyPath, handler)
     }
@@ -518,20 +554,14 @@ public class WebApp {
     public int ServeWith(int port, cfg: AmalgameNetHttpServerConfig) {
         let app = this
         let handler = conn => {
-            let req: HttpRequest = HttpRequest.FromH1Conn(conn)
-            let resp: HttpResponse = app.Handle(req)
-            resp.WriteToH1Conn(conn)
-            return 0
+            return app.serveConn(conn)
         }
         return Http1.ServeWith(port, cfg, handler)
     }
     public int ServeMtWith(int port, cfg: AmalgameNetHttpServerConfig) {
         let app = this
         let handler = conn => {
-            let req: HttpRequest = HttpRequest.FromH1Conn(conn)
-            let resp: HttpResponse = app.Handle(req)
-            resp.WriteToH1Conn(conn)
-            return 0
+            return app.serveConn(conn)
         }
         return Http1.ServeMtWith(port, cfg, handler)
     }
@@ -568,10 +598,7 @@ public class WebApp {
     public int ServeAsync(int port) {
         let app = this
         let handler = conn => {
-            let req: HttpRequest = HttpRequest.FromH1Conn(conn)
-            let resp: HttpResponse = app.Handle(req)
-            resp.WriteToH1Conn(conn)
-            return 0
+            return app.serveConn(conn)
         }
         return Http1.ServeAsync(port, handler)
     }
@@ -590,10 +617,7 @@ public class WebApp {
     public int ServeAsyncWith(int port, cfg: AmalgameNetHttpServerConfig) {
         let app = this
         let handler = conn => {
-            let req: HttpRequest = HttpRequest.FromH1Conn(conn)
-            let resp: HttpResponse = app.Handle(req)
-            resp.WriteToH1Conn(conn)
-            return 0
+            return app.serveConn(conn)
         }
         return Http1.ServeAsyncWith(port, cfg, handler)
     }
