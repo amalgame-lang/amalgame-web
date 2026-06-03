@@ -1,0 +1,76 @@
+// Unit tests for MosaicServer — the network-free surface: Host
+// dispatch (port stripping + www→apex folding), site registration,
+// and the SNI/ACME domain list. Serve / ServeHttps need sockets and
+// are exercised manually / by the Sites deployment.
+
+namespace Tests
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.Net.Http
+import Amalgame.Web
+
+public class Program {
+    public static void Main(string[] args) {
+        Console.WriteLine("amalgame-web — MosaicServer tests")
+
+        let app = WebApp.New()
+        let m = MosaicServer.New()
+            .AddSite(["example.com", "api.example.com"], app)
+
+        // ── 1. Host dispatch ─────────────────────────────────────
+        if (m.Pick("example.com") != null && m.Pick("api.example.com") != null) {
+            Console.WriteLine("[PASS] dispatch: registered hosts resolve to their app")
+        } else {
+            Console.WriteLine("[FAIL] dispatch")
+        }
+
+        // ── 2. Port stripped from the Host header ────────────────
+        if (m.Pick("example.com:443") != null) {
+            Console.WriteLine("[PASS] Host port stripped before lookup")
+        } else {
+            Console.WriteLine("[FAIL] port strip")
+        }
+
+        // ── 3. Unknown host → null (server answers 404) ──────────
+        if (m.Pick("nope.com") == null) {
+            Console.WriteLine("[PASS] unknown host → null")
+        } else {
+            Console.WriteLine("[FAIL] unknown host")
+        }
+
+        // ── 4. www folds to the apex (WwwCanonical default on) ───
+        if (m.Pick("www.example.com") != null) {
+            Console.WriteLine("[PASS] www.<host> folds to the apex site")
+        } else {
+            Console.WriteLine("[FAIL] www folding")
+        }
+
+        // ── 5. Domain list skips www aliases (SNI + ACME) ────────
+        if (m.Domains.Count() == 2) {
+            Console.WriteLine("[PASS] domain list = 2 (apex + api, no www entry)")
+        } else {
+            Console.WriteLine("[FAIL] domains count: " + String_FromInt(m.Domains.Count()))
+        }
+
+        // ── 6. WwwCanonical off → www does NOT fold ──────────────
+        let m2 = MosaicServer.New()
+            .WithWwwCanonical(false)
+            .AddSite(["x.com"], WebApp.New())
+        if (m2.Pick("x.com") != null && m2.Pick("www.x.com") == null) {
+            Console.WriteLine("[PASS] WwwCanonical(false): www no longer folds")
+        } else {
+            Console.WriteLine("[FAIL] www-canonical toggle")
+        }
+
+        // ── 7. AddStaticSite registers a site ────────────────────
+        let m3 = MosaicServer.New().AddStaticSite(["static.example"], "/srv/static")
+        if (m3.Pick("static.example") != null) {
+            Console.WriteLine("[PASS] AddStaticSite registers a static-serving app")
+        } else {
+            Console.WriteLine("[FAIL] AddStaticSite")
+        }
+
+        Console.WriteLine("done")
+    }
+}
