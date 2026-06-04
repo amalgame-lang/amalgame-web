@@ -1,0 +1,90 @@
+// Unit tests for HostGuard (v0.30.0) — Host header allow-list.
+
+namespace Tests
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.Net.Http
+import Amalgame.Web
+
+public class Program {
+    // Returns 1 on failure, 0 on pass (amc has no static mutable fields,
+    // so the caller accumulates).
+    static int expect(bool cond, string label) {
+        if (cond) {
+            Console.WriteLine("[PASS] " + label)
+            return 0
+        }
+        Console.WriteLine("[FAIL] " + label)
+        return 1
+    }
+
+    // Build a GET request carrying a given Host header.
+    static HttpRequest reqWithHost(string host) {
+        let r: HttpRequest = new HttpRequest()
+        r.Method = "GET"
+        r.Path = "/"
+        if (host != "") { r.Headers.Set("host", host) }
+        return r
+    }
+
+    public static void Main(string[] args) {
+        Console.WriteLine("amalgame-web — HostGuard tests")
+        var failed: int = 0
+
+        // Empty allow-list → opt-in safe: always proceed (null).
+        let empty: HostGuard = HostGuard.New()
+        failed = failed + Program.expect(empty.Check(Program.reqWithHost("anything.com")) == null,
+            "empty allow-list proceeds")
+
+        let g: HostGuard = HostGuard.New().Allow("example.com").Allow("www.example.com")
+
+        failed = failed + Program.expect(g.Check(Program.reqWithHost("example.com")) == null,
+            "exact allowed host proceeds")
+        failed = failed + Program.expect(g.Check(Program.reqWithHost("www.example.com")) == null,
+            "second allowed host proceeds")
+
+        // Port is ignored on the request side.
+        failed = failed + Program.expect(g.Check(Program.reqWithHost("example.com:8080")) == null,
+            "allowed host with port proceeds")
+
+        // Case-insensitive.
+        failed = failed + Program.expect(g.Check(Program.reqWithHost("EXAMPLE.COM")) == null,
+            "case-insensitive match proceeds")
+
+        // Disallowed host → 400.
+        let bad: HttpResponse = g.Check(Program.reqWithHost("evil.com"))
+        failed = failed + Program.expect(bad != null && bad.StatusCode == 400,
+            "disallowed host -> 400")
+
+        // Forged Host (attacker injecting a different domain) → 400.
+        let bad2: HttpResponse = g.Check(Program.reqWithHost("example.com.evil.com"))
+        failed = failed + Program.expect(bad2 != null && bad2.StatusCode == 400,
+            "suffix-extension host -> 400")
+
+        // Missing Host header with a non-empty list → 400.
+        let bad3: HttpResponse = g.Check(Program.reqWithHost(""))
+        failed = failed + Program.expect(bad3 != null && bad3.StatusCode == 400,
+            "missing Host -> 400")
+
+        // IPv6 literal allow + port on request.
+        let g6: HostGuard = HostGuard.New().Allow("[::1]")
+        failed = failed + Program.expect(g6.Check(Program.reqWithHost("[::1]:8443")) == null,
+            "IPv6 literal with port proceeds")
+
+        // HostGuard.For(list) builds from a list.
+        let hs: List<string> = new List<string>()
+        hs.Add("a.test")
+        hs.Add("b.test")
+        let gf: HostGuard = HostGuard.For(hs)
+        failed = failed + Program.expect(gf.Check(Program.reqWithHost("b.test")) == null
+            && gf.Check(Program.reqWithHost("c.test")) != null,
+            "For(list) builds allow-list")
+
+        if (failed == 0) {
+            Console.WriteLine("[PASS] host_guard suite")
+        } else {
+            Console.WriteLine("[FAIL] host_guard suite (" + String_FromInt(failed) + ")")
+        }
+    }
+}
