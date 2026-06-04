@@ -1,0 +1,81 @@
+// amalgame-web — Host header allow-list (v0.30.0).
+//
+// Rejects (400) any request whose Host header isn't in a configured
+// allow-list. Without this, an attacker-controlled Host can poison
+// caches, forge password-reset / absolute links the app builds from
+// Host, and enable DNS-rebinding against the origin. nginx's
+// `server_name` + default-server 444 and Django's ALLOWED_HOSTS solve
+// the same problem.
+//
+// Compare is on the host WITHOUT its optional ":port", case-insensitive.
+// IPv6 literals ("[::1]:8080" → "[::1]") are handled. An empty allow-list
+// is a no-op (opt-in safe).
+//
+//     let app = WebApp.New()
+//         .WithHostGuard(HostGuard.New()
+//             .Allow("example.com")
+//             .Allow("www.example.com"))
+
+namespace Amalgame.Web
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.Net.Http
+
+public class HostGuard {
+    public Hosts: List<string>   // normalized (lower, no port) allowed hosts
+
+    public HostGuard() {
+        this.Hosts = new List<string>()
+    }
+
+    public static HostGuard New() { return new HostGuard() }
+
+    // Add one allowed host (with or without a port — the port is ignored).
+    public HostGuard Allow(string host) {
+        this.Hosts.Add(HostGuard.normalize(host))
+        return this
+    }
+
+    // Build from a list of hosts in one call.
+    public static HostGuard For(List<string> hosts) {
+        let g: HostGuard = new HostGuard()
+        var i: int = 0
+        while (i < hosts.Count()) {
+            g.Hosts.Add(HostGuard.normalize(hosts.Get(i)))
+            i = i + 1
+        }
+        return g
+    }
+
+    // 400 Bad Request when the request's Host isn't allowed; null to let
+    // the request proceed. Empty allow-list → always proceed.
+    public HttpResponse Check(HttpRequest req) {
+        if (this.Hosts.Count() == 0) { return null }
+        var raw: string = ""
+        if (req.Headers != null && req.Headers.Has("host")) {
+            raw = req.Headers.Get("host")
+        }
+        let h: string = HostGuard.normalize(raw)
+        var i: int = 0
+        while (i < this.Hosts.Count()) {
+            if (this.Hosts.Get(i) == h) { return null }
+            i = i + 1
+        }
+        return HttpResponse.New().Status(400).Text("Bad Request")
+    }
+
+    // Lower-case, trim, and strip the optional ":port". IPv6 literals
+    // keep their bracketed form ("[::1]:80" → "[::1]").
+    static string normalize(string host) {
+        var h: string = String_ToLower(String_Trim(host))
+        if (String_Length(h) > 0 && String_CharAt1(h, 0) == "[") {
+            let rb: int = String_IndexOf(h, "]")
+            if (rb >= 0) { return String_Substring(h, 0, rb + 1) }
+            return h
+        }
+        let colon: int = String_IndexOf(h, ":")
+        if (colon >= 0) { return String_Substring(h, 0, colon) }
+        return h
+    }
+}
