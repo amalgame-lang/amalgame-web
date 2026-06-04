@@ -1,0 +1,149 @@
+// Unit tests for Observability — counters, Prometheus rendering, the
+// private-by-default /metrics gate, and the health/ready endpoints.
+// Network-free: requests are built by hand and Intercept() is called
+// directly.
+
+namespace Tests
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.Net.Http
+import Amalgame.Web
+
+public class Program {
+    static HttpRequest req(string method, string path, string remote) {
+        let r = new HttpRequest()
+        r.Method     = method
+        r.Path       = path
+        r.RemoteAddr = remote
+        return r
+    }
+
+    public static void Main(string[] args) {
+        Console.WriteLine("amalgame-web — Observability tests")
+        var pass: int = 0
+        var fail: int = 0
+
+        // ── 1. Counters + Prometheus render ──────────────────────
+        let o = Observability.New()
+        o.Record(200, 5)
+        o.Record(204, 1)
+        o.Record(404, 2)
+        o.Record(503, 7)
+        let body: string = o.render()
+        let hasTotal: bool   = String_IndexOf(body, "mosaic_http_requests_handled 4") >= 0
+        let has2xx: bool     = String_IndexOf(body, "mosaic_http_requests_total{class=\"2xx\"} 2") >= 0
+        let has4xx: bool     = String_IndexOf(body, "mosaic_http_requests_total{class=\"4xx\"} 1") >= 0
+        let has5xx: bool     = String_IndexOf(body, "mosaic_http_requests_total{class=\"5xx\"} 1") >= 0
+        let hasDur: bool     = String_IndexOf(body, "mosaic_http_request_duration_ms_sum 15") >= 0
+        if (hasTotal && has2xx && has4xx && has5xx && hasDur) {
+            Console.WriteLine("[PASS] counters + Prometheus exposition correct")
+            pass = pass + 1
+        } else {
+            Console.WriteLine("[FAIL] render wrong:\n" + body)
+            fail = fail + 1
+        }
+
+        // ── 2. Private-address classification ────────────────────
+        let priv: bool = Observability.isPrivateAddr("127.0.0.1:5000")
+            && Observability.isPrivateAddr("10.1.2.3:80")
+            && Observability.isPrivateAddr("192.168.1.5:9")
+            && Observability.isPrivateAddr("172.16.0.1:1")
+            && Observability.isPrivateAddr("172.31.255.1:1")
+            && Observability.isPrivateAddr("::1")
+        let pub: bool = !Observability.isPrivateAddr("8.8.8.8:443")
+            && !Observability.isPrivateAddr("203.0.113.5:1")
+            && !Observability.isPrivateAddr("172.32.0.1:1")   // just outside RFC1918
+            && !Observability.isPrivateAddr("")
+        if (priv && pub) {
+            Console.WriteLine("[PASS] private/public address classification")
+            pass = pass + 1
+        } else {
+            Console.WriteLine("[FAIL] address classification (priv=" + String_FromInt(priv) + " pub=" + String_FromInt(pub) + ")")
+            fail = fail + 1
+        }
+
+        // ── 3. /healthz and /readyz are public 200 ───────────────
+        let o3 = Observability.New()
+        let h: HttpResponse = o3.Intercept(Program.req("GET", "/healthz", "8.8.8.8:1"))
+        let rd: HttpResponse = o3.Intercept(Program.req("GET", "/readyz", "8.8.8.8:1"))
+        if (h != null && h.StatusCode == 200 && rd != null && rd.StatusCode == 200) {
+            Console.WriteLine("[PASS] /healthz + /readyz public 200")
+            pass = pass + 1
+        } else {
+            Console.WriteLine("[FAIL] health/ready not 200")
+            fail = fail + 1
+        }
+
+        // ── 4. /metrics from a private address → 200 ─────────────
+        let o4 = Observability.New()
+        let mPriv: HttpResponse = o4.Intercept(Program.req("GET", "/metrics", "10.0.0.5:4242"))
+        if (mPriv != null && mPriv.StatusCode == 200) {
+            Console.WriteLine("[PASS] /metrics served to private address")
+            pass = pass + 1
+        } else {
+            Console.WriteLine("[FAIL] /metrics blocked private address")
+            fail = fail + 1
+        }
+
+        // ── 5. /metrics from a PUBLIC address, no token → 404 ────
+        //      (hidden — same as a missing route; SECURITY default)
+        let o5 = Observability.New()
+        let mPub: HttpResponse = o5.Intercept(Program.req("GET", "/metrics", "203.0.113.9:5"))
+        if (mPub != null && mPub.StatusCode == 404) {
+            Console.WriteLine("[PASS] /metrics hidden (404) from public address w/o token")
+            pass = pass + 1
+        } else {
+            Console.WriteLine("[FAIL] /metrics exposed to public w/o token (status=" + String_FromInt(mPub.StatusCode) + ")")
+            fail = fail + 1
+        }
+
+        // ── 6. /metrics from a public address WITH valid token → 200
+        let o6 = Observability.New().WithMetricsToken("s3cr3t")
+        let reqTok = Program.req("GET", "/metrics", "203.0.113.9:5")
+        reqTok.Headers.Set("authorization", "Bearer s3cr3t")
+        let mTok: HttpResponse = o6.Intercept(reqTok)
+        // and a WRONG token still 404
+        let reqBad = Program.req("GET", "/metrics", "203.0.113.9:5")
+        reqBad.Headers.Set("authorization", "Bearer nope")
+        let mBad: HttpResponse = o6.Intercept(reqBad)
+        if (mTok != null && mTok.StatusCode == 200 && mBad != null && mBad.StatusCode == 404) {
+            Console.WriteLine("[PASS] /metrics: valid bearer token 200, wrong token 404")
+            pass = pass + 1
+        } else {
+            Console.WriteLine("[FAIL] token gate wrong (ok=" + String_FromInt(mTok.StatusCode) + " bad=" + String_FromInt(mBad.StatusCode) + ")")
+            fail = fail + 1
+        }
+
+        // ── 7. Non-observability path → Intercept returns null ───
+        let o7 = Observability.New()
+        let none: HttpResponse = o7.Intercept(Program.req("GET", "/users", "10.0.0.1:1"))
+        if (none == null && o7.IsObsPath("/metrics") && !o7.IsObsPath("/users")) {
+            Console.WriteLine("[PASS] non-obs path passes through; IsObsPath correct")
+            pass = pass + 1
+        } else {
+            Console.WriteLine("[FAIL] intercept/IsObsPath wrong")
+            fail = fail + 1
+        }
+
+        // ── 8. JSON access-log escaping neutralizes log injection ─
+        //      A forged path with a quote + CRLF must not break out of
+        //      the JSON string (no raw " or newline survive).
+        let evil: string = "/x\" ,\"injected\":\"yes\r\nGET /forged"
+        let esc: string = WebApp.jsonEsc(evil)
+        let noRawQuote: bool = String_IndexOf(esc, "\" ,\"injected") < 0
+        let noRawLf: bool    = String_IndexOf(esc, "\n") < 0
+        let hasEscQuote: bool = String_IndexOf(esc, "\\\"") >= 0
+        let hasEscLf: bool    = String_IndexOf(esc, "\\r\\n") >= 0
+        if (noRawQuote && noRawLf && hasEscQuote && hasEscLf) {
+            Console.WriteLine("[PASS] JSON access-log escaping neutralizes log injection")
+            pass = pass + 1
+        } else {
+            Console.WriteLine("[FAIL] jsonEsc leaks injection: " + esc)
+            fail = fail + 1
+        }
+
+        Console.WriteLine("")
+        Console.WriteLine("Summary: " + String_FromInt(pass) + " passed, " + String_FromInt(fail) + " failed")
+    }
+}

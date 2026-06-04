@@ -1,0 +1,228 @@
+// amalgame-web — Observability (v0.33.0).
+//
+// Built-in operational endpoints, wired into the WebApp pipeline:
+//
+//   /healthz  → 200 "ok"     (liveness — the process is up and serving)
+//   /readyz   → 200 "ready"  (readiness — see WithReadiness for deps)
+//   /metrics  → Prometheus exposition (request counters + in-flight)
+//
+//   WebApp.New()
+//       .WithObservability(Observability.New())
+//       .Get("/", ...)
+//
+// SECURITY — /metrics is NOT public by default.
+//   A metrics endpoint leaks operational detail (traffic volume, error
+//   rates, latency, internal paths if labelled). So by default /metrics
+//   is served ONLY to loopback / RFC1918 / ULA source addresses
+//   (`MetricsAllowPrivate`, on by default). A request from any other
+//   address gets a 404 — same body as a missing route, so the endpoint's
+//   very existence isn't confirmed to an outside scanner.
+//   To scrape from a public Prometheus, set a bearer token
+//   (`WithMetricsToken`): then `Authorization: Bearer <token>` is
+//   accepted from any address (private addresses still work tokenless).
+//
+//   /healthz and /readyz ARE public (k8s / load-balancer probes need
+//   them) but expose nothing beyond up/ready — no internals.
+//
+// Counters are mutex-guarded: the production server is ServeMt
+// (thread-per-connection), so every Begin()/Record() crosses threads.
+
+namespace Amalgame.Web
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.Threading
+import Amalgame.Net.Http
+
+public class Observability {
+    public Enabled:             bool
+    public MetricsPath:         string
+    public HealthPath:          string
+    public ReadyPath:           string
+    public MetricsToken:        string   // "" = no token accepted
+    public MetricsAllowPrivate: bool     // serve /metrics to private IPs tokenless
+
+    // counters (all guarded by Mu)
+    public Mu:        AmalgameMutex
+    public Total:     int
+    public C2xx:      int
+    public C3xx:      int
+    public C4xx:      int
+    public C5xx:      int
+    public Cother:    int
+    public InFlight:  int
+    public DurSumMs:  int
+
+    public Observability() {
+        this.Enabled             = true
+        this.MetricsPath         = "/metrics"
+        this.HealthPath          = "/healthz"
+        this.ReadyPath           = "/readyz"
+        this.MetricsToken        = ""
+        this.MetricsAllowPrivate = true
+        this.Mu                  = Threading.MutexNew()
+        this.Total    = 0
+        this.C2xx     = 0
+        this.C3xx     = 0
+        this.C4xx     = 0
+        this.C5xx     = 0
+        this.Cother   = 0
+        this.InFlight = 0
+        this.DurSumMs = 0
+    }
+
+    public static Observability New() { return new Observability() }
+
+    // ── builders ────────────────────────────────────────────────
+    public Observability WithMetricsPath(string p)      { this.MetricsPath = p;         return this }
+    public Observability WithHealthPath(string p)       { this.HealthPath  = p;         return this }
+    public Observability WithReadyPath(string p)        { this.ReadyPath   = p;         return this }
+    public Observability WithMetricsToken(string t)     { this.MetricsToken = t;        return this }
+    public Observability WithMetricsAllowPrivate(bool b){ this.MetricsAllowPrivate = b; return this }
+    public Observability Disable()                      { this.Enabled = false;         return this }
+
+    // ── counting (called by WebApp.Handle around dispatch) ──────
+    public void Begin() {
+        Threading.MutexLock(this.Mu)
+        this.InFlight = this.InFlight + 1
+        Threading.MutexUnlock(this.Mu)
+    }
+
+    public void Record(int status, int ms) {
+        Threading.MutexLock(this.Mu)
+        this.Total    = this.Total + 1
+        this.DurSumMs = this.DurSumMs + ms
+        if (this.InFlight > 0) { this.InFlight = this.InFlight - 1 }
+        if (status >= 200 && status < 300)      { this.C2xx = this.C2xx + 1 }
+        else if (status >= 300 && status < 400) { this.C3xx = this.C3xx + 1 }
+        else if (status >= 400 && status < 500) { this.C4xx = this.C4xx + 1 }
+        else if (status >= 500 && status < 600) { this.C5xx = this.C5xx + 1 }
+        else                                    { this.Cother = this.Cother + 1 }
+        Threading.MutexUnlock(this.Mu)
+    }
+
+    // True iff `p` is one of our endpoints (so WebApp.Handle can skip
+    // counting scrape/probe traffic).
+    public bool IsObsPath(string p) {
+        if (!this.Enabled) { return false }
+        return p == this.MetricsPath || p == this.HealthPath || p == this.ReadyPath
+    }
+
+    // ── interception (called early in WebApp.dispatch) ──────────
+    // Returns a response for one of our endpoints, or null if `req`
+    // is not an observability path (so normal dispatch continues).
+    public HttpResponse Intercept(HttpRequest req) {
+        if (!this.Enabled) { return null }
+        let p: string = req.Path
+        if (p == this.HealthPath) {
+            return HttpResponse.New().Status(200).Text("ok")
+        }
+        if (p == this.ReadyPath) {
+            return HttpResponse.New().Status(200).Text("ready")
+        }
+        if (p == this.MetricsPath) {
+            if (!this.allowMetrics(req)) {
+                // Hide the endpoint's existence from unauthorized callers.
+                return HttpResponse.New().Status(404).Text("Not found")
+            }
+            return HttpResponse.New()
+                .Status(200)
+                .Header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+                .Header("Cache-Control", "no-store")
+                .Text(this.render())
+        }
+        return null
+    }
+
+    // True iff this request may read /metrics: a valid bearer token, or
+    // a private/loopback source address when MetricsAllowPrivate is on.
+    private bool allowMetrics(HttpRequest req) {
+        if (String_Length(this.MetricsToken) > 0) {
+            if (req.Headers != null && req.Headers.Has("authorization")) {
+                let a: string = req.Headers.Get("authorization")
+                if (a == "Bearer " + this.MetricsToken) { return true }
+            }
+        }
+        if (this.MetricsAllowPrivate && Observability.isPrivateAddr(req.RemoteAddr)) {
+            return true
+        }
+        return false
+    }
+
+    // ── helpers ─────────────────────────────────────────────────
+
+    // Prometheus text exposition (v0.0.4). Snapshot under lock, then
+    // format outside it.
+    public string render() {
+        Threading.MutexLock(this.Mu)
+        let total:  int = this.Total
+        let c2:     int = this.C2xx
+        let c3:     int = this.C3xx
+        let c4:     int = this.C4xx
+        let c5:     int = this.C5xx
+        let co:     int = this.Cother
+        let inflt:  int = this.InFlight
+        let dur:    int = this.DurSumMs
+        Threading.MutexUnlock(this.Mu)
+
+        var out: string = ""
+        out = out + "# HELP mosaic_http_requests_total Total HTTP requests handled, by status class.\n"
+        out = out + "# TYPE mosaic_http_requests_total counter\n"
+        out = out + "mosaic_http_requests_total{class=\"2xx\"} " + String_FromInt(c2) + "\n"
+        out = out + "mosaic_http_requests_total{class=\"3xx\"} " + String_FromInt(c3) + "\n"
+        out = out + "mosaic_http_requests_total{class=\"4xx\"} " + String_FromInt(c4) + "\n"
+        out = out + "mosaic_http_requests_total{class=\"5xx\"} " + String_FromInt(c5) + "\n"
+        out = out + "mosaic_http_requests_total{class=\"other\"} " + String_FromInt(co) + "\n"
+        out = out + "# HELP mosaic_http_requests_handled Total HTTP requests handled (all classes).\n"
+        out = out + "# TYPE mosaic_http_requests_handled counter\n"
+        out = out + "mosaic_http_requests_handled " + String_FromInt(total) + "\n"
+        out = out + "# HELP mosaic_http_requests_in_flight HTTP requests currently being served.\n"
+        out = out + "# TYPE mosaic_http_requests_in_flight gauge\n"
+        out = out + "mosaic_http_requests_in_flight " + String_FromInt(inflt) + "\n"
+        out = out + "# HELP mosaic_http_request_duration_ms_sum Sum of request durations in milliseconds.\n"
+        out = out + "# TYPE mosaic_http_request_duration_ms_sum counter\n"
+        out = out + "mosaic_http_request_duration_ms_sum " + String_FromInt(dur) + "\n"
+        return out
+    }
+
+    // Loopback / RFC1918 / link-local / ULA classification on a
+    // "ip" or "ip:port" RemoteAddr string. Fail-closed: anything we
+    // can't positively classify as private returns false (→ the caller
+    // must present a token), which is the safe default for an
+    // information-exposing endpoint.
+    public static bool isPrivateAddr(string addr) {
+        if (String_Length(addr) == 0) { return false }
+        // IPv6 loopback / ULA (raw or [bracketed]).
+        if (Observability.startsWith(addr, "::1"))   { return true }
+        if (Observability.startsWith(addr, "[::1]")) { return true }
+        if (Observability.startsWith(addr, "fc"))    { return true }
+        if (Observability.startsWith(addr, "fd"))    { return true }
+        if (Observability.startsWith(addr, "[fc"))   { return true }
+        if (Observability.startsWith(addr, "[fd"))   { return true }
+        if (Observability.startsWith(addr, "fe80"))  { return true }
+        if (Observability.startsWith(addr, "[fe80")) { return true }
+        // IPv4 private ranges (prefix match on the dotted-quad head).
+        if (Observability.startsWith(addr, "127."))     { return true }
+        if (Observability.startsWith(addr, "10."))      { return true }
+        if (Observability.startsWith(addr, "192.168.")) { return true }
+        if (Observability.startsWith(addr, "169.254.")) { return true }
+        // 172.16.0.0 – 172.31.255.255
+        var k: int = 16
+        while (k <= 31) {
+            if (Observability.startsWith(addr, "172." + String_FromInt(k) + ".")) { return true }
+            k = k + 1
+        }
+        return false
+    }
+
+    private static bool startsWith(string s, string prefix) {
+        let pn: int = String_Length(prefix)
+        if (String_Length(s) < pn) { return false }
+        var i: int = 0
+        while (i < pn) {
+            if (String_CharAt1(s, i) != String_CharAt1(prefix, i)) { return false }
+            i = i + 1
+        }
+        return true
+    }
+}
