@@ -33,6 +33,10 @@ public class WebContext {
     // buffer for binary-safe multipart uploads via ctx.Multipart().
     // null when the context was built without a request (unit tests).
     public Req:       HttpRequest
+    // v0.32.0: per-request CSP nonce. Non-empty only when the app enabled
+    // SecurityHeaders.WithCspNonce(); stamp it on inline <script> tags
+    // (`<script nonce="{{cspNonce}}">`) so they pass the strict CSP.
+    public CspNonce:  string
 
     public WebContext() {
         this.Params    = new Map<string, string>()
@@ -44,6 +48,7 @@ public class WebContext {
         this.Path      = ""
         this.Query     = new Map<string, string>()
         this.Req       = null
+        this.CspNonce  = ""
     }
 
     public string QueryParam(string name) {
