@@ -432,7 +432,20 @@ public class WebApp {
             if (this.SessionEnabled) {
                 ctx.Session = this.SessionCfg.LoadSession(req)
             }
+            // v0.32.0: per-request CSP nonce. Generate before the handler
+            // so it can stamp <script nonce="..."> / pass ctx.CspNonce to
+            // the template.
+            if (this.Headers != null && this.Headers.NonceCsp) {
+                ctx.CspNonce = SecurityHeaders.GenerateNonce()
+            }
             resp = m.Route.Handler(ctx)
+            // Pre-stamp the nonce'd CSP so SecurityHeaders.Apply keeps it
+            // (handler-wins via the Has() check), tying the response policy
+            // to the nonce the template used.
+            if (this.Headers != null && this.Headers.NonceCsp && ctx.CspNonce != ""
+                && !resp.Headers.Has("Content-Security-Policy")) {
+                resp.Header("Content-Security-Policy", this.Headers.CspFor(ctx.CspNonce))
+            }
             // Persist any handler mutations (backend write + Set-Cookie)
             // before the response-side middlewares stamp the rest.
             if (this.SessionEnabled) {

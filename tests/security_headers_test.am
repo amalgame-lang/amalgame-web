@@ -198,6 +198,41 @@ public class Program {
             Console.WriteLine("[FAIL] FromMap unknown-keys path broke known keys")
         }
 
+        // ── 12. CSP nonce (v0.32.0) ────────────────────────────────
+        let n1: string = SecurityHeaders.GenerateNonce()
+        let n2: string = SecurityHeaders.GenerateNonce()
+        if (String_Length(n1) == 32 && n1 != n2) {
+            Console.WriteLine("[PASS] GenerateNonce 128-bit + unique")
+        } else {
+            Console.WriteLine("[FAIL] GenerateNonce got len=" + String_FromInt(String_Length(n1)))
+        }
+        let hn: SecurityHeaders = SecurityHeaders.StrictHtml().WithCspNonce()
+        let withNonce: string = hn.CspFor("ABC123")
+        if (hn.NonceCsp && String_IndexOf(withNonce, "'nonce-ABC123'") >= 0
+            && String_IndexOf(withNonce, "script-src 'self' 'nonce-ABC123'") >= 0) {
+            Console.WriteLine("[PASS] CspFor injects the nonce into script-src")
+        } else {
+            Console.WriteLine("[FAIL] CspFor nonce got: " + withNonce)
+        }
+        // Empty nonce (non-handler responses) leaves a valid nonce-less CSP.
+        let noNonce: string = hn.CspFor("")
+        if (String_IndexOf(noNonce, "nonce") < 0
+            && String_IndexOf(noNonce, "script-src 'self'") >= 0) {
+            Console.WriteLine("[PASS] CspFor empty leaves nonce-less CSP")
+        } else {
+            Console.WriteLine("[FAIL] CspFor empty got: " + noNonce)
+        }
+        // Apply (no per-request nonce) emits the nonce-less policy.
+        let rn = HttpResponse.New().Text("x")
+        hn.Apply(rn)
+        let appliedCsp: string = rn.Headers.Get("Content-Security-Policy")
+        if (String_IndexOf(appliedCsp, "script-src 'self'") >= 0
+            && String_IndexOf(appliedCsp, "nonce") < 0) {
+            Console.WriteLine("[PASS] Apply emits nonce-less CSP")
+        } else {
+            Console.WriteLine("[FAIL] Apply CSP got: " + appliedCsp)
+        }
+
         Console.WriteLine("done")
     }
 }

@@ -8,6 +8,7 @@ namespace Amalgame.Web
 
 import Amalgame.Collections
 import Amalgame.String
+import Amalgame.Random
 import Amalgame.Net.Http
 
 // ─────────────────────────────────────────────────────────────────
@@ -57,6 +58,7 @@ public class SecurityHeaders {
     public PermissionsPolicy:    string
     public Coop:                 string
     public Coep:                 string
+    public NonceCsp:             bool    // CSP carries a per-request script nonce
 
     public SecurityHeaders() {
         this.Hsts                  = ""
@@ -67,6 +69,7 @@ public class SecurityHeaders {
         this.PermissionsPolicy     = ""
         this.Coop                  = ""
         this.Coep                  = ""
+        this.NonceCsp              = false
     }
 
     // Strict preset for HTML responses. CSP locks scripts/styles to
@@ -105,6 +108,55 @@ public class SecurityHeaders {
 
     public SecurityHeaders WithCsp(string policy)              { this.ContentSecurityPolicy = policy;  return this }
     public SecurityHeaders WithoutCsp()                        { this.ContentSecurityPolicy = "";      return this }
+
+    // Enable a strict, nonce-based CSP so inline <script nonce="…"> works
+    // WITHOUT 'unsafe-inline'. WebApp generates a fresh nonce per request,
+    // exposes it as ctx.CspNonce (stamp it on your <script> tags / pass it
+    // to the template), and emits the matching CSP whose script-src
+    // carries that nonce (injected per request via CspFor()).
+    public SecurityHeaders WithCspNonce() {
+        this.NonceCsp = true
+        // Base policy with no nonce clause. CspFor injects the per-request
+        // nonce into script-src. (A brace-style placeholder can't be used
+        // here — amc interpolates brace sequences even inside comments.)
+        this.ContentSecurityPolicy = "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+        return this
+    }
+
+    // The CSP string for a given per-request nonce. With NonceCsp on, a
+    // non-empty nonce is injected into script-src ('nonce-…'); an empty
+    // nonce leaves the base policy (non-HTML responses still get a valid
+    // CSP). With NonceCsp off, returns the configured policy unchanged.
+    public string CspFor(string nonce) {
+        if (!this.NonceCsp) { return this.ContentSecurityPolicy }
+        if (nonce != "") {
+            return String_Replace(this.ContentSecurityPolicy,
+                "script-src 'self'", "script-src 'self' 'nonce-" + nonce + "'")
+        }
+        return this.ContentSecurityPolicy
+    }
+
+    // A fresh crypto-grade CSP nonce (128-bit, hex). Opaque token — the
+    // browser only checks that the response CSP's nonce matches the
+    // `nonce=` attribute on the script tag.
+    public static string GenerateNonce() {
+        let r: Random = Random.FromSystem()
+        let bytes: List<int> = r.Bytes(16)
+        return SecurityHeaders.hexEncode(bytes)
+    }
+
+    static string hexEncode(List<int> bytes) {
+        let hexd: string = "0123456789abcdef"
+        var out: string = ""
+        let n: int = bytes.Count()
+        var i: int = 0
+        while (i < n) {
+            let b: int = bytes.Get(i)
+            out = out + String_CharAt1(hexd, b / 16) + String_CharAt1(hexd, b % 16)
+            i = i + 1
+        }
+        return out
+    }
     public SecurityHeaders WithFrameOptions(string value)      { this.FrameOptions = value;            return this }
     public SecurityHeaders WithContentTypeOptions(bool on)     { this.ContentTypeOptions = on;         return this }
     public SecurityHeaders WithReferrerPolicy(string value)    { this.ReferrerPolicy = value;          return this }
@@ -171,7 +223,10 @@ public class SecurityHeaders {
             resp.Header("Strict-Transport-Security", this.Hsts)
         }
         if (this.ContentSecurityPolicy != "" && !resp.Headers.Has("Content-Security-Policy")) {
-            resp.Header("Content-Security-Policy", this.ContentSecurityPolicy)
+            // CspFor("") yields the nonce-less policy for non-handler
+            // responses; the handler path pre-stamps the nonce'd CSP
+            // (and wins via the Has() check above).
+            resp.Header("Content-Security-Policy", this.CspFor(""))
         }
         if (this.FrameOptions != "" && !resp.Headers.Has("X-Frame-Options")) {
             resp.Header("X-Frame-Options", this.FrameOptions)
