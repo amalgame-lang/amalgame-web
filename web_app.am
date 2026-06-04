@@ -67,6 +67,7 @@ public class WebApp {
     public Headers:         SecurityHeaders   // null = no security headers
     public CorsCfg:         Cors              // null = no CORS handling
     public CsrfCfg:         Csrf              // null = no CSRF validation
+    public HostsCfg:        HostGuard         // null = no Host allow-list
     public Limiter:         RateLimit         // null = no rate limit
     public Logging:         LogConfig         // null = no access log
     // v0.19.0: auth middleware. Both nullable — null = not configured.
@@ -122,6 +123,7 @@ public class WebApp {
         this.Headers       = null
         this.CorsCfg       = null
         this.CsrfCfg       = null
+        this.HostsCfg      = null
         this.Limiter       = null
         this.Logging       = null
         this.BasicAuthCfg  = null
@@ -141,6 +143,7 @@ public class WebApp {
     public WebApp WithSecurityHeaders(SecurityHeaders sec) { this.Headers = sec;  return this }
     public WebApp WithCors(Cors c)                         { this.CorsCfg = c;    return this }
     public WebApp WithCsrf(Csrf c)                         { this.CsrfCfg = c;    return this }
+    public WebApp WithHostGuard(HostGuard g)               { this.HostsCfg = g;   return this }
     public WebApp WithRateLimit(RateLimit rl)              { this.Limiter = rl;   return this }
     // v0.19.0: register auth schemes. They challenge only Protected()
     // routes. Configure both to accept either (e.g. Bearer JWT for the
@@ -302,12 +305,39 @@ public class WebApp {
         if (String_Length(ip) == 0) { ip = "-" }
         let dtNs: int = DateTime.NowMonotonicNanos() - t0
         let dtMs: int = dtNs / 1000000
-        Log.Info(req.Method + " " + host + " " + req.Path + " -> "
+        // Sanitize attacker-controlled fields (Host, path, method) so an
+        // embedded CR/LF can't forge extra log lines (log injection).
+        Log.Info(WebApp.logSafe(req.Method) + " " + WebApp.logSafe(host)
+                 + " " + WebApp.logSafe(req.Path) + " -> "
                  + String_FromInt(final.StatusCode) + " "
                  + String_FromInt(dtMs) + "ms " + ip)
     }
 
+    // Replace CR / LF / tab with a single space so request-derived values
+    // can't break out of a log line (anti log-forging).
+    private static string logSafe(string s) {
+        var out: string = ""
+        let n: int = String_Length(s)
+        var i: int = 0
+        while (i < n) {
+            let ch: string = String_CharAt1(s, i)
+            if (ch == "\r" || ch == "\n" || ch == "\t") { out = out + " " }
+            else { out = out + ch }
+            i = i + 1
+        }
+        return out
+    }
+
     private HttpResponse dispatch(HttpRequest req) {
+        // 0. Host allow-list. Reject a forged/unknown Host before anything
+        // else touches it (cache poisoning / DNS-rebinding / link forgery).
+        if (this.HostsCfg != null) {
+            let badHost: HttpResponse = this.HostsCfg.Check(req)
+            if (badHost != null) {
+                return this.applyResponseMiddlewares(req, badHost)
+            }
+        }
+
         // 1. RateLimit. Cheapest reject — go first.
         if (this.Limiter != null) {
             let limited: HttpResponse = this.Limiter.Check(req)
