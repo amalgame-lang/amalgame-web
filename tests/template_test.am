@@ -103,6 +103,37 @@ public class Program {
         failed = failed + Program.check("partial + escape",
             t.Render(pv), "<li>&lt;x&gt;</li>")
 
+        // ── 8. Context-aware escapers (v0.29.0) ──────────────────
+        // Direct escaper functions.
+        let bs: string = String_FromCodepoint(92)   // backslash
+        failed = failed + Program.check("JsEscape quote",
+            Template.JsEscape("a\"b"), "a" + bs + "x22b")
+        failed = failed + Program.check("JsEscape </script>",
+            Template.JsEscape("</script>"), bs + "x3C" + bs + "x2Fscript" + bs + "x3E")
+        failed = failed + Program.check("AttrEscape space",
+            Template.AttrEscape("a b"), "a&#x20;b")
+        failed = failed + Program.check("UrlEscape space+amp",
+            Template.UrlEscape("a b&c"), "a%20b%26c")
+        failed = failed + Program.check("UrlEscape unreserved kept",
+            Template.UrlEscape("Aa9-_.~"), "Aa9-_.~")
+
+        // Filter syntax via the template pipe.
+        var fx: Map<string, string> = new Map<string, string>()
+        fx.Set("x", "<b>")
+        fx.Set("q", "a b")
+        failed = failed + Program.check("default tag = HTML escape",
+            Template.RenderString(LB + "x" + RB, fx), "&lt;b&gt;")
+        failed = failed + Program.check("pipe js filter",
+            Template.RenderString(LB + "x|js" + RB, fx), bs + "x3Cb" + bs + "x3E")
+        failed = failed + Program.check("pipe url filter",
+            Template.RenderString(LB + "q|url" + RB, fx), "a%20b")
+        failed = failed + Program.check("pipe attr filter",
+            Template.RenderString(LB + "q|attr" + RB, fx), "a&#x20;b")
+        failed = failed + Program.check("pipe raw filter no escape",
+            Template.RenderString(LB + "x|raw" + RB, fx), "<b>")
+        failed = failed + Program.check("unknown filter falls back to HTML escape",
+            Template.RenderString(LB + "x|bogus" + RB, fx), "&lt;b&gt;")
+
         // ── Summary ──────────────────────────────────────────────
         Console.WriteLine("")
         Console.WriteLine("failed=" + String_FromInt(failed))
