@@ -1,0 +1,62 @@
+// Unit tests for LoginGuard (v0.31.0) — brute-force lockout.
+
+namespace Tests
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.Net.Http
+import Amalgame.Web
+
+public class Program {
+    static int expect(bool cond, string label) {
+        if (cond) { Console.WriteLine("[PASS] " + label); return 0 }
+        Console.WriteLine("[FAIL] " + label); return 1
+    }
+
+    public static void Main(string[] args) {
+        Console.WriteLine("amalgame-web — LoginGuard tests")
+        var failed: int = 0
+
+        let lg: LoginGuard = LoginGuard.New().WithMaxFailures(3).WithLockoutSec(60)
+        let ip: string = "203.0.113.7"
+
+        // Fresh key: not locked.
+        failed = failed + Program.expect(!lg.IsLocked(ip), "fresh key not locked")
+        failed = failed + Program.expect(lg.Check(ip) == null, "fresh key Check null")
+
+        // Two failures: still under the threshold.
+        lg.RecordFailure(ip)
+        lg.RecordFailure(ip)
+        failed = failed + Program.expect(!lg.IsLocked(ip), "2 failures not yet locked")
+
+        // Third failure arms the lock.
+        lg.RecordFailure(ip)
+        failed = failed + Program.expect(lg.IsLocked(ip), "3rd failure locks")
+
+        // Check now returns 429 + Retry-After.
+        let blocked: HttpResponse = lg.Check(ip)
+        failed = failed + Program.expect(blocked != null && blocked.StatusCode == 429,
+            "locked Check → 429")
+        failed = failed + Program.expect(blocked != null && blocked.Headers.Has("Retry-After"),
+            "429 carries Retry-After")
+
+        // A successful auth clears the lock + counter.
+        lg.RecordSuccess(ip)
+        failed = failed + Program.expect(!lg.IsLocked(ip), "RecordSuccess clears lock")
+        failed = failed + Program.expect(lg.Check(ip) == null, "after success Check null")
+
+        // Independent keys don't interfere.
+        let ip2: string = "198.51.100.4"
+        let lg2: LoginGuard = LoginGuard.New().WithMaxFailures(2).WithLockoutSec(60)
+        lg2.RecordFailure(ip)
+        lg2.RecordFailure(ip)
+        failed = failed + Program.expect(lg2.IsLocked(ip) && !lg2.IsLocked(ip2),
+            "lockout is per-key")
+
+        if (failed == 0) {
+            Console.WriteLine("[PASS] login_guard suite")
+        } else {
+            Console.WriteLine("[FAIL] login_guard suite (" + String_FromInt(failed) + ")")
+        }
+    }
+}
