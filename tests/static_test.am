@@ -342,10 +342,97 @@ public class Program {
                 + " maxage=" + String_FromInt(fm.CacheMaxAge))
         }
 
+        // ── 16. Security hardening (v0.29.0) ─────────────────────
+        // Fixtures: dotfiles, a .well-known file, source/lock files, and
+        // a symlink escaping the served root.
+        @c {
+            mkdir("/tmp/amalgame_static_test/.git", 0755);
+            mkdir("/tmp/amalgame_static_test/.well-known", 0755);
+        }
+        File_WriteAll(fixDir + "/.env", "SECRET=hunter2")
+        File_WriteAll(fixDir + "/.git/config", "[core]")
+        File_WriteAll(fixDir + "/.well-known/security.txt", "Contact: mailto:x@y.z")
+        File_WriteAll(fixDir + "/app.am", "namespace X")
+        File_WriteAll(fixDir + "/amalgame.lock", "[[package]]")
+        File_WriteAll("/tmp/amalgame_static_OUTSIDE.txt", "top secret")
+        @c {
+            unlink("/tmp/amalgame_static_test/leak");
+            symlink("/tmp/amalgame_static_OUTSIDE.txt", "/tmp/amalgame_static_test/leak");
+        }
+
+        // 16a. Dotfile (.env) → 403
+        let reqEnv = new HttpRequest()
+        reqEnv.Method = "GET"; reqEnv.Path = "/assets/.env"
+        let rEnv = st.Serve(reqEnv)
+        if (rEnv != null && rEnv.StatusCode == 403) {
+            Console.WriteLine("[PASS] dotfile .env → 403")
+        } else {
+            Console.WriteLine("[FAIL] .env got: " + String_FromInt(rEnv.StatusCode))
+        }
+
+        // 16b. Dotdir (.git/config) → 403
+        let reqGit = new HttpRequest()
+        reqGit.Method = "GET"; reqGit.Path = "/assets/.git/config"
+        let rGit = st.Serve(reqGit)
+        if (rGit != null && rGit.StatusCode == 403) {
+            Console.WriteLine("[PASS] .git/config → 403")
+        } else {
+            Console.WriteLine("[FAIL] .git/config got: " + String_FromInt(rGit.StatusCode))
+        }
+
+        // 16c. .well-known IS allowed (ACME / security.txt) → 200
+        let reqWk = new HttpRequest()
+        reqWk.Method = "GET"; reqWk.Path = "/assets/.well-known/security.txt"
+        let rWk = st.Serve(reqWk)
+        if (rWk != null && rWk.StatusCode == 200) {
+            Console.WriteLine("[PASS] .well-known/security.txt → 200 (not blocked)")
+        } else {
+            Console.WriteLine("[FAIL] .well-known got: " + String_FromInt(rWk.StatusCode))
+        }
+
+        // 16d. Source file (.am) → 403
+        let reqAm = new HttpRequest()
+        reqAm.Method = "GET"; reqAm.Path = "/assets/app.am"
+        let rAm = st.Serve(reqAm)
+        if (rAm != null && rAm.StatusCode == 403) {
+            Console.WriteLine("[PASS] source .am → 403")
+        } else {
+            Console.WriteLine("[FAIL] .am got: " + String_FromInt(rAm.StatusCode))
+        }
+
+        // 16e. Lockfile (.lock) → 403
+        let reqLock = new HttpRequest()
+        reqLock.Method = "GET"; reqLock.Path = "/assets/amalgame.lock"
+        let rLock = st.Serve(reqLock)
+        if (rLock != null && rLock.StatusCode == 403) {
+            Console.WriteLine("[PASS] .lock → 403")
+        } else {
+            Console.WriteLine("[FAIL] .lock got: " + String_FromInt(rLock.StatusCode))
+        }
+
+        // 16f. Symlink escaping the root → 403 (realpath containment)
+        let reqLeak = new HttpRequest()
+        reqLeak.Method = "GET"; reqLeak.Path = "/assets/leak"
+        let rLeak = st.Serve(reqLeak)
+        if (rLeak != null && rLeak.StatusCode == 403) {
+            Console.WriteLine("[PASS] symlink escape → 403")
+        } else {
+            var leakStatus: string = "null"
+            if (rLeak != null) { leakStatus = String_FromInt(rLeak.StatusCode) }
+            Console.WriteLine("[FAIL] symlink escape got: " + leakStatus)
+        }
+
         // Cleanup
         File_Delete(fixDir + "/hello.txt")
         File_Delete(fixDir + "/empty.bin")
         File_Delete(fixDir + "/nested/inner.txt")
+        File_Delete(fixDir + "/.env")
+        File_Delete(fixDir + "/.git/config")
+        File_Delete(fixDir + "/.well-known/security.txt")
+        File_Delete(fixDir + "/app.am")
+        File_Delete(fixDir + "/amalgame.lock")
+        File_Delete("/tmp/amalgame_static_OUTSIDE.txt")
+        @c { unlink("/tmp/amalgame_static_test/leak"); }
 
         Console.WriteLine("amalgame-web — Static tests done")
     }
