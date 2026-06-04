@@ -1,0 +1,137 @@
+// amalgame-web — LoginGuard: brute-force / credential-stuffing lockout
+// for authentication endpoints (v0.31.0).
+//
+// The per-IP RateLimit middleware throttles *all* traffic uniformly; it
+// is the wrong tool for login abuse, where you want to count FAILED
+// auth attempts per identity (IP, username, or both) and lock that
+// identity out for a while once a threshold is crossed — without
+// penalizing a user who simply reloads a page.
+//
+// The app drives it around its own credential check, so it works with
+// any auth scheme (form login, Basic, JWT issuance, …):
+//
+//     let lg = LoginGuard.New()          // 5 failures / 15 min → 15 min lock
+//     // ... in the POST /login handler, key = client IP (or IP+"|"+user):
+//     let locked = lg.Check(ip)
+//     if (locked != null) { return locked }          // 429 + Retry-After
+//     if (passwordOk) { lg.RecordSuccess(ip) }       // clears the counter
+//     else            { lg.RecordFailure(ip) }       // may arm the lock
+//
+// Counting uses the monotonic clock (immune to NTP slews). Thread-safe
+// under ServeMt via a mutex, same as RateLimit.
+
+namespace Amalgame.Web
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.DateTime
+import Amalgame.Threading
+import Amalgame.Net.Http
+
+// Per-key counter state.
+public class LoginAttempt {
+    public Failures:         int   // failures counted in the current window
+    public WindowStartNanos: int   // monotonic-nanos when counting began
+    public LockedUntilNanos: int   // monotonic-nanos the lock lifts (0 = not locked)
+
+    public LoginAttempt() {
+        this.Failures         = 0
+        this.WindowStartNanos = 0
+        this.LockedUntilNanos = 0
+    }
+}
+
+public class LoginGuard {
+    public MaxFailures:  int   // failures within the window that arm a lock
+    public WindowNanos:  int   // counting window
+    public LockoutNanos: int   // how long the lock holds
+    public Store:        Map<string, LoginAttempt>
+    public Mu:           AmalgameMutex
+
+    public LoginGuard() {
+        // Full i64 literals: `900 * 1000000000` would be evaluated as a
+        // 32-bit int and overflow (→ negative). 900e9 ns = 15 min.
+        this.MaxFailures  = 5
+        this.WindowNanos  = 900000000000   // 15 min
+        this.LockoutNanos = 900000000000   // 15 min
+        this.Store        = new Map<string, LoginAttempt>()
+        this.Mu           = Threading.MutexNew()
+    }
+
+    public static LoginGuard New() { return new LoginGuard() }
+
+    public LoginGuard WithMaxFailures(int n)  { this.MaxFailures  = n;                  return this }
+    public LoginGuard WithWindowSec(int s)    { this.WindowNanos  = s * 1000000000;     return this }
+    public LoginGuard WithLockoutSec(int s)   { this.LockoutNanos = s * 1000000000;     return this }
+
+    // 429 Too Many Requests + Retry-After when `key` is currently locked
+    // out; null to let the caller proceed with its credential check.
+    public HttpResponse Check(string key) {
+        let remaining: int = this.lockRemainingSec(key)
+        if (remaining <= 0) { return null }
+        var r: HttpResponse = HttpResponse.New().Status(429)
+            .Text("Too many failed attempts. Try again later.")
+        r.Header("Retry-After", String_FromInt(remaining))
+        return r
+    }
+
+    // True while `key` is locked out.
+    public bool IsLocked(string key) {
+        return this.lockRemainingSec(key) > 0
+    }
+
+    // Record one failed attempt. Resets the counter if the window has
+    // elapsed, then increments; crossing MaxFailures arms the lock.
+    public void RecordFailure(string key) {
+        let now: int = DateTime.NowMonotonicNanos()
+        Threading.MutexLock(this.Mu)
+        var a: LoginAttempt = this.fetch(key)
+        // Already locked: leave the lock as-is (don't extend on every hit).
+        if (a.LockedUntilNanos > now) {
+            Threading.MutexUnlock(this.Mu)
+            return
+        }
+        // New window if the previous one elapsed (or first failure).
+        if (a.WindowStartNanos == 0 || (now - a.WindowStartNanos) > this.WindowNanos) {
+            a.Failures = 0
+            a.WindowStartNanos = now
+        }
+        a.Failures = a.Failures + 1
+        if (a.Failures >= this.MaxFailures) {
+            a.LockedUntilNanos = now + this.LockoutNanos
+        }
+        this.Store.Set(key, a)
+        Threading.MutexUnlock(this.Mu)
+    }
+
+    // Record a successful auth: clears the counter and any lock for `key`.
+    public void RecordSuccess(string key) {
+        Threading.MutexLock(this.Mu)
+        var a: LoginAttempt = new LoginAttempt()
+        this.Store.Set(key, a)
+        Threading.MutexUnlock(this.Mu)
+    }
+
+    // ── internals ───────────────────────────────────────────────────
+
+    // Seconds of lock remaining for `key` (0 if not locked). Thread-safe.
+    int lockRemainingSec(string key) {
+        let now: int = DateTime.NowMonotonicNanos()
+        Threading.MutexLock(this.Mu)
+        var rem: int = 0
+        if (this.Store.Has(key)) {
+            let a: LoginAttempt = this.Store.Get(key)
+            if (a.LockedUntilNanos > now) {
+                rem = (a.LockedUntilNanos - now) / 1000000000 + 1
+            }
+        }
+        Threading.MutexUnlock(this.Mu)
+        return rem
+    }
+
+    // Get-or-create the attempt for `key`. Caller holds Mu.
+    LoginAttempt fetch(string key) {
+        if (this.Store.Has(key)) { return this.Store.Get(key) }
+        return new LoginAttempt()
+    }
+}
