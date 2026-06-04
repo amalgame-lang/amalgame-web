@@ -86,7 +86,95 @@ public class Template {
         return out
     }
 
+    // Context-aware escapers. `{{x}}` escapes for HTML *text/quoted-attr*
+    // by default (HtmlEscape), but a value placed in a JavaScript string,
+    // an unquoted HTML attribute, or a URL parameter needs a different
+    // escaping or it's still XSS-able. Select with a pipe filter:
+    //   {{x|js}}    inside <script> … "{{x|js}}" …
+    //   {{x|attr}}  inside <div data-x={{x|attr}}>  (quoted or not)
+    //   {{x|url}}   inside <a href="/s?q={{x|url}}">
+    //   {{x|raw}}   no escaping (same as {{{x}}})
+    // All three iterate BYTES (correct for URL/attr percent/hex encoding)
+    // and pass bytes ≥128 through so UTF-8 survives.
+
+    // JS string-literal context. OWASP style: alphanumerics pass, every
+    // other ASCII byte → \xHH. Blocks quote breakout AND </script>.
+    public static string JsEscape(string s) {
+        var out: string = ""
+        let n: int = String_Length(s)
+        var i: int = 0
+        while (i < n) {
+            let b: int = Template.byteAt(s, i)
+            if (Template.isAlnum(b) || b >= 128) { out = out + String_CharAt1(s, i) }
+            else { out = out + "\\x" + Template.hex2(b) }
+            i = i + 1
+        }
+        return out
+    }
+
+    // HTML attribute context (quoted or unquoted). Alphanumerics pass,
+    // every other ASCII byte → &#xHH;.
+    public static string AttrEscape(string s) {
+        var out: string = ""
+        let n: int = String_Length(s)
+        var i: int = 0
+        while (i < n) {
+            let b: int = Template.byteAt(s, i)
+            if (Template.isAlnum(b) || b >= 128) { out = out + String_CharAt1(s, i) }
+            else { out = out + "&#x" + Template.hex2(b) + ";" }
+            i = i + 1
+        }
+        return out
+    }
+
+    // URL-component context (RFC 3986). Unreserved (A-Za-z0-9 - _ . ~)
+    // pass; every other byte is percent-encoded.
+    public static string UrlEscape(string s) {
+        var out: string = ""
+        let n: int = String_Length(s)
+        var i: int = 0
+        while (i < n) {
+            let b: int = Template.byteAt(s, i)
+            let unreserved: bool = Template.isAlnum(b) || b == 45 || b == 95 || b == 46 || b == 126
+            if (unreserved) { out = out + String_CharAt1(s, i) }
+            else { out = out + "%" + Template.hex2(b) }
+            i = i + 1
+        }
+        return out
+    }
+
+    // Map a pipe-filter name to an escaper. Unknown filter → HtmlEscape
+    // (fail safe: escape rather than leak).
+    static string applyFilter(string val, string filt) {
+        if (filt == "" || filt == "html") { return Template.HtmlEscape(val) }
+        if (filt == "js")   { return Template.JsEscape(val) }
+        if (filt == "attr") { return Template.AttrEscape(val) }
+        if (filt == "url")  { return Template.UrlEscape(val) }
+        if (filt == "raw")  { return val }
+        return Template.HtmlEscape(val)
+    }
+
     // ── Internals ───────────────────────────────────────────────────
+
+    // Byte value (0..255) at index i. URL/attr/JS escaping is byte-level.
+    static int byteAt(string s, int i) {
+        var b: int = 0
+        @c { b = (i64)(unsigned char) s[i]; }
+        return b
+    }
+
+    static bool isAlnum(int b) {
+        if (b >= 48 && b <= 57)  { return true }   // 0-9
+        if (b >= 65 && b <= 90)  { return true }   // A-Z
+        if (b >= 97 && b <= 122) { return true }   // a-z
+        return false
+    }
+
+    // Two uppercase hex digits for a byte.
+    static string hex2(int b) {
+        let d: string = "0123456789ABCDEF"
+        return String_CharAt1(d, b / 16) + String_CharAt1(d, b % 16)
+    }
 
     // Render one span of template text. `depth` bounds partial recursion.
     string renderSpan(string src, Map<string, string> data, int depth) {
@@ -160,8 +248,19 @@ public class Template {
                             // stray close — skip
                             i = tagEnd
                         } else {
-                            // normal {{key}} — escaped
-                            out = out + Template.HtmlEscape(Template.valueOf(data, inner))
+                            // normal {{key}} or {{key|filter}} — escaped.
+                            // Default is HTML-context escaping; an explicit
+                            // pipe filter selects a different context
+                            // (js / attr / url / raw). Unknown filter falls
+                            // back to HTML-escape (fail safe).
+                            let pipe: int = String_IndexOf(inner, "|")
+                            if (pipe < 0) {
+                                out = out + Template.HtmlEscape(Template.valueOf(data, inner))
+                            } else {
+                                let k: string = String_Trim(String_Substring(inner, 0, pipe))
+                                let f: string = String_Trim(String_Substring(inner, pipe + 1, String_Length(inner) - pipe - 1))
+                                out = out + Template.applyFilter(Template.valueOf(data, k), f)
+                            }
                             i = tagEnd
                         }
                     }

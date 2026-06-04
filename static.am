@@ -163,9 +163,32 @@ public class Static {
             || String_Substring(normalized, 0, rn) != rootNorm) {
             return HttpResponse.New().Status(403).Text("Forbidden")
         }
+        // Hidden-segment guard: deny any path segment beginning with "."
+        // (blocks `.git/`, `.env`, `.htpasswd`, dotfiles in general) —
+        // EXCEPT `.well-known`, which legitimately holds ACME http-01
+        // challenges and security.txt and MUST stay reachable. Security
+        // boundary → 403, never a null fall-through.
+        if (Static.hasHiddenSegment(rel)) {
+            return HttpResponse.New().Status(403).Text("Forbidden")
+        }
+        // Never serve Amalgame source / lockfiles even if they sit in the
+        // served tree (source-code / dependency-pin leak).
+        let extLow: string = String_ToLower(Path_GetExtension(normalized))
+        if (extLow == ".am" || extLow == ".lock") {
+            return HttpResponse.New().Status(403).Text("Forbidden")
+        }
         // Missing or non-file (dir / symlink / fifo): fall through.
         if (!File_Exists(normalized) || !File_IsFile(normalized)) {
             return null
+        }
+        // Symlink-escape guard: the lexical containment check above is
+        // string-only, so a symlink INSIDE the root pointing outside
+        // (e.g. public/leak -> /etc) would pass it. Now that the file is
+        // confirmed to exist, resolve symlinks with realpath(3) and
+        // re-check containment against the resolved real root. 403 on
+        // escape (or if either path can't be resolved).
+        if (!Static.realContained(normalized, this.Root)) {
+            return HttpResponse.New().Status(403).Text("Forbidden")
         }
         // Method gate. Now that we've confirmed a real file is
         // available at this URL, restrict to GET/HEAD. Other
@@ -339,6 +362,46 @@ public class Static {
     }
 
     // ── Internal helpers ────────────────────────────────────────────
+
+    // True iff any path segment of `rel` begins with "." (a hidden
+    // file/dir), with the sole exception of ".well-known". Used to deny
+    // dotfile exposure (.git, .env, .htpasswd, …) while keeping ACME
+    // http-01 / security.txt under /.well-known/ reachable.
+    private static bool hasHiddenSegment(string rel) {
+        let n: int = String_Length(rel)
+        var i: int = 0
+        while (i < n) {
+            // A segment starts at index 0 or right after a "/".
+            let atStart: bool = (i == 0) || (String_CharAt1(rel, i - 1) == "/")
+            if (atStart && String_CharAt1(rel, i) == ".") {
+                var j: int = i
+                while (j < n && String_CharAt1(rel, j) != "/") { j = j + 1 }
+                let seg: string = String_Substring(rel, i, j - i)
+                if (seg != ".well-known") { return true }
+            }
+            i = i + 1
+        }
+        return false
+    }
+
+    // True iff `path`, with all symlinks and "." / ".." resolved by
+    // realpath(3), is contained within the resolved real `root` (equal to
+    // it or a "/"-bounded descendant). False if either can't be resolved.
+    // Called only after `path` is confirmed to exist.
+    private static bool realContained(string path, string root) {
+        var ok: bool = false
+        @c {
+            char rp[4096];
+            char rr[4096];
+            if (realpath(path, rp) != NULL && realpath(root, rr) != NULL) {
+                size_t lr = strlen(rr);
+                if (strncmp(rp, rr, lr) == 0 && (rp[lr] == '\0' || rp[lr] == '/')) {
+                    ok = true;
+                }
+            }
+        }
+        return ok
+    }
 
     private static string NormalizePrefix(string p) {
         var s: string = p
