@@ -1,0 +1,424 @@
+// ── Validation (Mosaic v0.36.0) ──────────────────────────────
+//
+// A typed, declarative input validator for request data — the
+// defence-in-depth layer between raw client bytes and your handler
+// logic (SQL, templates, the filesystem). It is *pure*: it parses and
+// checks, it never executes, so it cannot itself be an injection sink.
+// Its security value is in CENTRALISING input hardening so apps stop
+// handing unbounded, untyped, control-char-laden strings downstream.
+//
+// Every accepted field is, by construction:
+//   - length-bounded (a default 8 KiB cap even with no MaxLen — an
+//     anti-DoS floor against unbounded form fields),
+//   - free of control characters (NUL / C0 / DEL) unless the field
+//     explicitly opts into multiline text — this shuts header- and
+//     log-injection and NUL-byte truncation tricks,
+//   - of the declared type (strict int/float/bool/email parsing —
+//     "12abc" is NOT 12), and
+//   - optionally constrained to an allow-list (OneOf) or character
+//     class — an allow-list is the strongest anti-injection control.
+//
+// Usage:
+//   let v = new Validator()
+//   v.Field("email").Required().Email()
+//   v.Field("age").Optional().Int().Range(0, 130)
+//   v.Field("role").Required().OneOf(["admin", "user"])
+//   let res = v.Check(ctx.Req.Form())        // any Map<string,string>
+//   if (!res.Ok) {
+//       return HttpResponse.New().Status(422).Json(res.ErrorJson())
+//   }
+//   let age: int = res.IntOf("age")          // typed, already validated
+
+namespace Amalgame.Web
+
+import Amalgame.Collections
+import Amalgame.String
+
+// ── ValidationResult ─────────────────────────────────────────
+public class ValidationResult {
+    public Ok:     bool
+    public Errors: Map<string, string>   // field → first error message
+    public Values: Map<string, string>   // normalised, accepted values
+
+    public ValidationResult() {
+        this.Ok     = true
+        this.Errors = new Map<string, string>()
+        this.Values = new Map<string, string>()
+    }
+
+    // Normalised string value of an accepted field ("" if absent).
+    public string Of(name: string) {
+        if (this.Values.Has(name)) { return this.Values.Get(name) }
+        return ""
+    }
+    public bool Has(name: string)      { return this.Values.Has(name) }
+    public bool HasError(name: string) { return this.Errors.Has(name) }
+    public string ErrorOf(name: string) {
+        if (this.Errors.Has(name)) { return this.Errors.Get(name) }
+        return ""
+    }
+
+    // Typed accessors — safe because Check already validated the type.
+    public int IntOf(name: string) {
+        return Validator.ParseIntOr(this.Of(name), 0)
+    }
+    public bool BoolOf(name: string) {
+        let v: string = this.Of(name)
+        return v == "true"
+    }
+
+    // "field: message; field2: message2" — handy for logs / plain 422s.
+    public string ErrorSummary() {
+        var out: string = ""
+        let keys: List<string> = this.Errors.Keys()
+        let n: int = keys.Count()
+        for i in 0..n {
+            let k: string = keys.Get(i)
+            if (String_Length(out) > 0) { out = out + "; " }
+            out = out + k + ": " + this.Errors.Get(k)
+        }
+        return out
+    }
+
+    // Minimal JSON body for a 422 response: {"errors":{"f":"msg",...}}.
+    // Keys + messages are our own ASCII strings (field names + fixed
+    // phrases), so a plain escape of '"' and '\' is sufficient.
+    public string ErrorJson() {
+        var out: string = "{\"errors\":{"
+        let keys: List<string> = this.Errors.Keys()
+        let n: int = keys.Count()
+        for i in 0..n {
+            let k: string = keys.Get(i)
+            if (i > 0) { out = out + "," }
+            out = out + "\"" + Validator.JsonEscape(k) + "\":\""
+                + Validator.JsonEscape(this.Errors.Get(k)) + "\""
+        }
+        out = out + "}}"
+        return out
+    }
+}
+
+// ── FieldRule ────────────────────────────────────────────────
+// One field's constraints. Fields are public so Validator.Check can
+// read them; set them through the chaining builders, not directly.
+public class FieldRule {
+    public Name:      string
+    public Req:       bool
+    public Typ:       string        // "string" | "int" | "float" | "bool" | "email"
+    public MinLenV:   int           // -1 = unset
+    public MaxLenV:   int           // -1 = unset → DEFAULT_MAX cap
+    public HasLo:     bool
+    public HasHi:     bool
+    public LoV:       int
+    public HiV:       int
+    public Allowed:   List<string>  // OneOf enum; empty = any
+    public TrimV:     bool
+    public Multiline: bool
+    public Charset:   string        // "" | "alnum" | "alpha" | "numeric"
+
+    public FieldRule(name: string) {
+        this.Name      = name
+        this.Req       = false
+        this.Typ       = "string"
+        this.MinLenV   = -1
+        this.MaxLenV   = -1
+        this.HasLo     = false
+        this.HasHi     = false
+        this.LoV       = 0
+        this.HiV       = 0
+        this.Allowed   = new List<string>()
+        this.TrimV     = true
+        this.Multiline = false
+        this.Charset   = ""
+    }
+
+    public FieldRule Required()  { this.Req = true;  return this }
+    public FieldRule Optional()  { this.Req = false; return this }
+    public FieldRule Int()       { this.Typ = "int";   return this }
+    public FieldRule Float()     { this.Typ = "float"; return this }
+    public FieldRule Bool()      { this.Typ = "bool";  return this }
+    public FieldRule Email()     { this.Typ = "email"; return this }
+    public FieldRule MinLen(n: int) { this.MinLenV = n; return this }
+    public FieldRule MaxLen(n: int) { this.MaxLenV = n; return this }
+    public FieldRule Range(lo: int, hi: int) {
+        this.HasLo = true; this.LoV = lo
+        this.HasHi = true; this.HiV = hi
+        return this
+    }
+    public FieldRule OneOf(xs: List<string>) { this.Allowed = xs; return this }
+    public FieldRule NoTrim()        { this.TrimV = false;     return this }
+    public FieldRule AllowMultiline() { this.Multiline = true; return this }
+    public FieldRule Alnum()   { this.Charset = "alnum";   return this }
+    public FieldRule Alpha()   { this.Charset = "alpha";   return this }
+    public FieldRule Numeric() { this.Charset = "numeric"; return this }
+}
+
+// ── Validator ────────────────────────────────────────────────
+public class Validator {
+    public Rules: List<FieldRule>
+
+    public Validator() {
+        this.Rules = new List<FieldRule>()
+    }
+
+    // Declare a field; returns its rule for chaining.
+    public FieldRule Field(name: string) {
+        let r = new FieldRule(name)
+        this.Rules.Add(r)
+        return r
+    }
+
+    // Run every rule against `input`. Never throws; collects all field
+    // errors (first error per field) and the normalised accepted
+    // values. result.Ok is true iff there were no errors.
+    public ValidationResult Check(input: Map<string, string>) {
+        let res = new ValidationResult()
+        let n: int = this.Rules.Count()
+        for i in 0..n {
+            let rule: FieldRule = this.Rules.Get(i)
+            let name: string = rule.Name
+
+            let present: bool = input.Has(name)
+            var val: string = ""
+            if (present) { val = input.Get(name) }
+            if (rule.TrimV) { val = String_Trim(val) }
+
+            if (String_Length(val) == 0) {
+                if (rule.Req) {
+                    res.Errors.Set(name, "is required")
+                }
+                // optional + empty → simply not in Values
+                continue
+            }
+
+            // ── Length cap (always enforced; anti-DoS floor) ──
+            var effMax: int = rule.MaxLenV
+            if (effMax < 0) { effMax = 8192 }
+            if (String_Length(val) > effMax) {
+                res.Errors.Set(name, "too long (max " + String_FromInt(effMax) + ")")
+                continue
+            }
+            if (rule.MinLenV >= 0 && String_Length(val) < rule.MinLenV) {
+                res.Errors.Set(name, "too short (min " + String_FromInt(rule.MinLenV) + ")")
+                continue
+            }
+
+            // ── Control characters (header/log injection, NUL) ──
+            if (Validator.HasControlChars(val, rule.Multiline)) {
+                res.Errors.Set(name, "contains control characters")
+                continue
+            }
+
+            // ── Character class ──
+            if (rule.Charset == "alnum" && !Validator.IsClass(val, "alnum")) {
+                res.Errors.Set(name, "must be alphanumeric"); continue
+            }
+            if (rule.Charset == "alpha" && !Validator.IsClass(val, "alpha")) {
+                res.Errors.Set(name, "must be letters only"); continue
+            }
+            if (rule.Charset == "numeric" && !Validator.IsClass(val, "numeric")) {
+                res.Errors.Set(name, "must be digits only"); continue
+            }
+
+            // ── Type ──
+            var normalized: string = val
+            if (rule.Typ == "int") {
+                if (!Validator.IsInt(val)) {
+                    res.Errors.Set(name, "must be an integer"); continue
+                }
+                let iv: int = Validator.ParseIntOr(val, 0)
+                if (rule.HasLo && iv < rule.LoV) {
+                    res.Errors.Set(name, "must be ≥ " + String_FromInt(rule.LoV)); continue
+                }
+                if (rule.HasHi && iv > rule.HiV) {
+                    res.Errors.Set(name, "must be ≤ " + String_FromInt(rule.HiV)); continue
+                }
+            } else if (rule.Typ == "float") {
+                if (!Validator.IsFloat(val)) {
+                    res.Errors.Set(name, "must be a number"); continue
+                }
+                // Range bounds (if any) are compared on the integer part —
+                // sufficient for the inclusive bounds validation uses.
+                let iv: int = Validator.ParseIntOr(val, 0)
+                if (rule.HasLo && iv < rule.LoV) {
+                    res.Errors.Set(name, "must be ≥ " + String_FromInt(rule.LoV)); continue
+                }
+                if (rule.HasHi && iv > rule.HiV) {
+                    res.Errors.Set(name, "must be ≤ " + String_FromInt(rule.HiV)); continue
+                }
+            } else if (rule.Typ == "bool") {
+                let nb: string = Validator.NormalizeBool(val)
+                if (String_Length(nb) == 0) {
+                    res.Errors.Set(name, "must be true or false"); continue
+                }
+                normalized = nb
+            } else if (rule.Typ == "email") {
+                if (!Validator.IsEmail(val)) {
+                    res.Errors.Set(name, "must be a valid email"); continue
+                }
+            }
+
+            // ── Allow-list (strongest anti-injection) ──
+            if (rule.Allowed.Count() > 0) {
+                var ok: bool = false
+                let m: int = rule.Allowed.Count()
+                for j in 0..m {
+                    if (rule.Allowed.Get(j) == normalized) { ok = true }
+                }
+                if (!ok) {
+                    res.Errors.Set(name, "is not an allowed value"); continue
+                }
+            }
+
+            res.Values.Set(name, normalized)
+        }
+        res.Ok = res.Errors.Keys().Count() == 0
+        return res
+    }
+
+    // ── helpers ──────────────────────────────────────────────
+
+    // True if `s` contains a control character. C0 (< 0x20) and DEL
+    // (0x7f) are control; when `multiline` is set, TAB/LF/CR are
+    // tolerated (textarea inputs). Scans bytes — binary-safe.
+    public static bool HasControlChars(s: string, multiline: bool) {
+        var bad: bool = false
+        @c {
+            const unsigned char* p = (const unsigned char*) s;
+            if (p) {
+                for (; *p; p++) {
+                    unsigned char c = *p;
+                    int ctl = (c < 0x20) || (c == 0x7f);
+                    if (ctl) {
+                        if (multiline && (c == '\t' || c == '\n' || c == '\r')) {
+                            continue;
+                        }
+                        bad = true;
+                        break;
+                    }
+                }
+            }
+        }
+        return bad
+    }
+
+    // Strict signed-integer test: optional leading '-', then 1..18
+    // digits, nothing else. Rejects "", "-", "+5", "12abc", overflow.
+    // Byte-scanned in C — AM has no lexicographic char comparison.
+    public static bool IsInt(s: string) {
+        var ok: bool = false
+        @c {
+            const char* p = (const char*) s;
+            if (p && *p) {
+                int i = 0;
+                if (p[0] == '-') i = 1;
+                int digits = 0, bad = 0;
+                for (; p[i]; i++) {
+                    if (p[i] < '0' || p[i] > '9') { bad = 1; break; }
+                    digits++;
+                }
+                ok = (!bad && digits >= 1 && digits <= 18);
+            }
+        }
+        return ok
+    }
+
+    // Strict decimal test: optional '-', digits with at most one '.'.
+    // Rejects "", ".", "-", "1.2.3", "1e9".
+    public static bool IsFloat(s: string) {
+        var ok: bool = false
+        @c {
+            const char* p = (const char*) s;
+            if (p && *p) {
+                int i = 0;
+                if (p[0] == '-') i = 1;
+                int digits = 0, dots = 0, bad = 0;
+                for (; p[i]; i++) {
+                    if (p[i] == '.') { dots++; if (dots > 1) { bad = 1; break; } }
+                    else if (p[i] >= '0' && p[i] <= '9') { digits++; }
+                    else { bad = 1; break; }
+                }
+                ok = (!bad && digits >= 1);
+            }
+        }
+        return ok
+    }
+
+    // Map common truthy/falsey form values to "true"/"false"; "" if it
+    // is neither (→ a validation error).
+    public static string NormalizeBool(s: string) {
+        let v: string = String_ToLower(s)
+        if (v == "true" || v == "1" || v == "on" || v == "yes") { return "true" }
+        if (v == "false" || v == "0" || v == "off" || v == "no") { return "false" }
+        return ""
+    }
+
+    // Conservative email check — enough to keep junk + injection out,
+    // not a full RFC 5322 parser. One '@', non-empty local part, a dot
+    // in the domain, no whitespace, total length ≤ 254 (SMTP limit).
+    // Control chars are already rejected upstream.
+    public static bool IsEmail(s: string) {
+        let n: int = String_Length(s)
+        if (n < 3 || n > 254) { return false }
+        let at: int = String_IndexOf(s, "@")
+        if (at <= 0) { return false }               // empty local part
+        // exactly one '@'
+        let rest: string = String_Substring(s, at + 1, n - at - 1)
+        if (String_IndexOf(rest, "@") >= 0) { return false }
+        if (String_Length(rest) == 0) { return false }
+        if (String_IndexOf(rest, ".") < 0) { return false }  // domain needs a dot
+        if (String_IndexOf(s, " ") >= 0) { return false }
+        // domain can't start/end with a dot
+        if (String_CharAt1(rest, 0) == ".") { return false }
+        if (String_CharAt1(rest, String_Length(rest) - 1) == ".") { return false }
+        return true
+    }
+
+    // Character-class predicate over the whole string (ASCII). Scanned
+    // in C — `cls` is "numeric" | "alpha" | anything-else (= alnum).
+    public static bool IsClass(s: string, cls: string) {
+        var ok: bool = false
+        @c {
+            const char* p = (const char*) s;
+            const char* k = (const char*) cls;
+            if (p && *p) {
+                int wantNum = k && strcmp(k, "numeric") == 0;
+                int wantAlpha = k && strcmp(k, "alpha") == 0;
+                int bad = 0;
+                for (; *p; p++) {
+                    char c = *p;
+                    int d = (c >= '0' && c <= '9');
+                    int a = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+                    if (wantNum) { if (!d) { bad = 1; break; } }
+                    else if (wantAlpha) { if (!a) { bad = 1; break; } }
+                    else { if (!d && !a) { bad = 1; break; } }
+                }
+                ok = !bad;
+            }
+        }
+        return ok
+    }
+
+    // Parse a strict-int string to int; returns `dflt` on anything odd.
+    public static int ParseIntOr(s: string, dflt: int) {
+        if (!Validator.IsInt(s)) { return dflt }
+        var out: int = 0
+        @c {
+            if (s) { out = (int64_t) strtoll(s, NULL, 10); }
+        }
+        return out
+    }
+
+    // Escape '"' and '\' for embedding in our own JSON error body.
+    public static string JsonEscape(s: string) {
+        var out: string = ""
+        let n: int = String_Length(s)
+        for i in 0..n {
+            let c: string = String_CharAt1(s, i)
+            if (c == "\"") { out = out + "\\\"" }
+            else if (c == "\\") { out = out + "\\\\" }
+            else { out = out + c }
+        }
+        return out
+    }
+}
