@@ -616,3 +616,16 @@ carries `SecurityHeaders` / CORS just like any other response.
   is unchanged) but recommended — it shuts the authorization-code
   interception window even when the client secret is exposed
   (SPAs / mobile / public clients). Available since web v0.34.0.
+- **OpenID Connect** (web v0.35.0): call `.WithOidc(issuer)` to turn the
+  client into a full OIDC relying party. `HandleCallback` then verifies
+  the `id_token` the token endpoint returns — RS256 signature against
+  the IdP's JWKS (fetched from a pinned `jwks_uri` or via
+  `/.well-known/openid-configuration` discovery), plus `iss` / `aud` /
+  `exp` and a one-time `nonce` minted in `StartLogin` (replay defence).
+  The `alg` is hard-pinned to RS256 (`none` / `HS*` are rejected up
+  front — defeats the algorithm-confusion attack) and the flow fails
+  closed: a missing or invalid id_token aborts the callback. The
+  verified claims (`sub` / `email` / `name`) are authoritative. For
+  Google, the preset pre-wires the issuer + JWKS, so `.WithOidc()` takes
+  no argument. `VerifyIdTokenJwks(idToken, jwksJson, nonce)` exposes the
+  network-free verifier (cache the JWKS yourself, or unit-test).

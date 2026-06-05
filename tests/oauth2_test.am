@@ -12,6 +12,7 @@ import Amalgame.Collections
 import Amalgame.String
 import Amalgame.Net.Http
 import Amalgame.Web
+import Amalgame.Crypto
 
 public class Program {
     public static void Main(string[] args) {
@@ -130,6 +131,109 @@ public class Program {
             Console.WriteLine("[FAIL] PKCE StartLogin shape")
         }
 
+        // ── 10+. OIDC id_token verification (network-free) ──────
+        // Self-sign an id_token with a fresh RS256 key, publish that
+        // key as a one-entry JWKS, and drive VerifyIdTokenJwks — the
+        // same crypto path HandleCallback walks against a live JWKS.
+        let kid: string = "k1"
+        let kR: JwsKey = JwsKey.GenerateRs256()
+        let jwkPub: string = kR.JwkPublic()
+        let nVal: string = Program.jf(jwkPub, "n")
+        let eVal: string = Program.jf(jwkPub, "e")
+        let jwks: string = "{\"keys\":[{\"kty\":\"RSA\",\"kid\":\"" + kid
+            + "\",\"n\":\"" + nVal + "\",\"e\":\"" + eVal + "\"}]}"
+
+        let header: string = "{\"alg\":\"RS256\",\"kid\":\"" + kid + "\"}"
+        let hB64: string = Bytes.ToBase64Url(Bytes.FromString(header))
+        // exp far in the future (year 2100) so the test never ages out.
+        let payload: string = "{\"iss\":\"https://idp.test\",\"aud\":\"client-123\""
+            + ",\"exp\":4102444800,\"nonce\":\"n0nce\",\"sub\":\"user-1\""
+            + ",\"email\":\"a@b.co\",\"name\":\"Alice\"}"
+        let pB64: string = Bytes.ToBase64Url(Bytes.FromString(payload))
+        let signingInput: string = hB64 + "." + pB64
+        let sig: List<int> = kR.Sign(Bytes.FromString(signingInput))
+        let sB64: string = Bytes.ToBase64Url(sig)
+        let idToken: string = hB64 + "." + pB64 + "." + sB64
+
+        let cli: OAuth2Client = new OAuth2Client()
+            .WithClientId("client-123")
+            .WithOidc("https://idp.test")
+
+        // 10. Happy path — valid signature + all claims.
+        let v1: OAuth2Result = cli.VerifyIdTokenJwks(idToken, jwks, "n0nce")
+        if (v1.Ok && v1.UserId == "user-1" && v1.Email == "a@b.co") {
+            Console.WriteLine("[PASS] OIDC id_token verifies (sig + iss/aud/exp/nonce)")
+        } else {
+            Console.WriteLine("[FAIL] OIDC happy path: ok=" + (v1.Ok ? "T" : "F") + " err=" + v1.Error)
+        }
+
+        // 11. Nonce mismatch → rejected (replay defence).
+        let v2: OAuth2Result = cli.VerifyIdTokenJwks(idToken, jwks, "WRONG")
+        if (!v2.Ok && String_IndexOf(v2.Error, "nonce") >= 0) {
+            Console.WriteLine("[PASS] OIDC rejects nonce mismatch")
+        } else {
+            Console.WriteLine("[FAIL] OIDC nonce: ok=" + (v2.Ok ? "T" : "F") + " err=" + v2.Error)
+        }
+
+        // 12. Wrong audience → rejected.
+        let cliOther: OAuth2Client = new OAuth2Client()
+            .WithClientId("someone-else").WithOidc("https://idp.test")
+        let v3: OAuth2Result = cliOther.VerifyIdTokenJwks(idToken, jwks, "n0nce")
+        if (!v3.Ok && String_IndexOf(v3.Error, "audience") >= 0) {
+            Console.WriteLine("[PASS] OIDC rejects audience mismatch")
+        } else {
+            Console.WriteLine("[FAIL] OIDC aud: ok=" + (v3.Ok ? "T" : "F") + " err=" + v3.Error)
+        }
+
+        // 13. Wrong issuer → rejected.
+        let cliIss: OAuth2Client = new OAuth2Client()
+            .WithClientId("client-123").WithOidc("https://evil.test")
+        let v4: OAuth2Result = cliIss.VerifyIdTokenJwks(idToken, jwks, "n0nce")
+        if (!v4.Ok && String_IndexOf(v4.Error, "issuer") >= 0) {
+            Console.WriteLine("[PASS] OIDC rejects issuer mismatch")
+        } else {
+            Console.WriteLine("[FAIL] OIDC iss: ok=" + (v4.Ok ? "T" : "F") + " err=" + v4.Error)
+        }
+
+        // 14. Tampered payload (re-base64'd claims, original signature)
+        //     → signature invalid.
+        let evilPayload: string = "{\"iss\":\"https://idp.test\",\"aud\":\"client-123\""
+            + ",\"exp\":4102444800,\"nonce\":\"n0nce\",\"sub\":\"admin\"}"
+        let evilP: string = Bytes.ToBase64Url(Bytes.FromString(evilPayload))
+        let forged: string = hB64 + "." + evilP + "." + sB64
+        let v5: OAuth2Result = cli.VerifyIdTokenJwks(forged, jwks, "n0nce")
+        if (!v5.Ok && String_IndexOf(v5.Error, "signature") >= 0) {
+            Console.WriteLine("[PASS] OIDC rejects tampered payload (sig invalid)")
+        } else {
+            Console.WriteLine("[FAIL] OIDC tamper: ok=" + (v5.Ok ? "T" : "F") + " err=" + v5.Error)
+        }
+
+        // 15. Algorithm-confusion: header claims HS256 → hard reject
+        //     BEFORE any signature work.
+        let hsHeader: string = "{\"alg\":\"HS256\",\"kid\":\"" + kid + "\"}"
+        let hsH: string = Bytes.ToBase64Url(Bytes.FromString(hsHeader))
+        let hsToken: string = hsH + "." + pB64 + "." + sB64
+        let v6: OAuth2Result = cli.VerifyIdTokenJwks(hsToken, jwks, "n0nce")
+        if (!v6.Ok && String_IndexOf(v6.Error, "alg") >= 0) {
+            Console.WriteLine("[PASS] OIDC rejects non-RS256 alg (algorithm confusion)")
+        } else {
+            Console.WriteLine("[FAIL] OIDC alg pin: ok=" + (v6.Ok ? "T" : "F") + " err=" + v6.Error)
+        }
+
         Console.WriteLine("done")
+    }
+
+    // Minimal `"key":"value"` extractor for the canonical (escape-free)
+    // JWK the crypto facade exports — avoids a Json-stdlib dependency in
+    // the test link set.
+    static string jf(json: string, key: string) {
+        let needle: string = "\"" + key + "\":\""
+        let i: int = String_IndexOf(json, needle)
+        if (i < 0) { return "" }
+        let start: int = i + String_Length(needle)
+        let rest: string = String_Substring(json, start, String_Length(json) - start)
+        let end: int = String_IndexOf(rest, "\"")
+        if (end < 0) { return rest }
+        return String_Substring(rest, 0, end)
     }
 }

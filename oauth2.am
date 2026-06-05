@@ -94,6 +94,16 @@ public class OAuth2Client {
     // the auth-code flow against interception. Opt-in (WithPkce) to keep
     // the existing flow byte-compatible; recommended for public clients.
     public UsePkce:      bool
+    // v0.35.0: OpenID Connect. When on, HandleCallback verifies the
+    // id_token returned by the token endpoint — RS256 signature against
+    // the IdP's JWKS, plus iss / aud / exp / nonce claim checks — and
+    // trusts the id_token's claims (sub/email/name) as authoritative
+    // instead of (or before) the userinfo call. StartLogin also sends a
+    // one-time `nonce`, carried in the state cookie, that the id_token
+    // must echo back (replay defence). Opt-in via WithOidc(issuer).
+    public UseOidc:      bool
+    public Issuer:       string      // expected `iss`; also the discovery base
+    public JwksUri:      string      // explicit JWKS endpoint (else discovered)
 
     public OAuth2Client() {
         this.ClientId     = ""
@@ -106,6 +116,9 @@ public class OAuth2Client {
         this.StateCookie  = "__oauth_state"
         this.Provider     = ""
         this.UsePkce      = false
+        this.UseOidc      = false
+        this.Issuer       = ""
+        this.JwksUri      = ""
     }
 
     // ── Presets ──────────────────────────────────────
@@ -125,8 +138,10 @@ public class OAuth2Client {
         return c
     }
 
-    // Google Sign-In via OAuth2 (not OIDC — see file header).
-    // Create credentials at https://console.cloud.google.com/apis/credentials.
+    // Google Sign-In via OAuth2. Create credentials at
+    // https://console.cloud.google.com/apis/credentials. The issuer +
+    // JWKS endpoint are pre-wired, so `.WithOidc()` (no argument) is
+    // enough to switch on id_token verification.
     public static OAuth2Client Google(clientId: string, clientSecret: string, redirectUri: string) {
         let c = new OAuth2Client()
         c.ClientId     = clientId
@@ -140,6 +155,9 @@ public class OAuth2Client {
         c.Scopes.Add("email")
         c.Scopes.Add("profile")
         c.Provider     = "google"
+        // Pre-wire OIDC discovery (opt-in still via WithOidc()).
+        c.Issuer       = "https://accounts.google.com"
+        c.JwksUri      = "https://www.googleapis.com/oauth2/v3/certs"
         return c
     }
 
@@ -155,6 +173,22 @@ public class OAuth2Client {
     public OAuth2Client WithPkce()                  { this.UsePkce = true; return this }
     public OAuth2Client WithScopes(xs: List<string>) { this.Scopes = xs; return this }
     public OAuth2Client WithStateCookie(s: string)  { this.StateCookie  = s; return this }
+
+    // Enable OpenID Connect id_token verification. Pass the issuer (the
+    // `iss` the IdP stamps, e.g. "https://accounts.google.com") — or ""
+    // to reuse a preset's pre-wired Issuer. Forces the `openid` scope on
+    // (no openid scope → no id_token). With OIDC on, HandleCallback
+    // cryptographically verifies the id_token before returning Ok.
+    public OAuth2Client WithOidc(issuer: string) {
+        this.UseOidc = true
+        if (String_Length(issuer) > 0) { this.Issuer = issuer }
+        var hasOpenid: bool = false
+        for s in this.Scopes { if (s == "openid") { hasOpenid = true } }
+        if (!hasOpenid) { this.Scopes.Add("openid") }
+        return this
+    }
+    // Pin the JWKS endpoint explicitly (skips OIDC discovery).
+    public OAuth2Client WithJwksUri(s: string)      { this.JwksUri = s; return this }
 
     // ── StartLogin ───────────────────────────────────
 
@@ -173,16 +207,30 @@ public class OAuth2Client {
         if (String_Length(scopeStr) > 0) {
             url = url + "&scope=" + OAuth2Client.UrlEncode(scopeStr)
         }
-        // PKCE (RFC 7636 S256): send code_challenge in the auth request
-        // and stash the verifier in the state cookie (after a '~' — never
-        // produced by base64url, so it's an unambiguous separator).
+        // The state cookie carries up to three tilde-separated fields:
+        //   state ~ pkce_verifier ~ oidc_nonce
+        // '~' is never produced by base64url, so the split is
+        // unambiguous; unused fields are left empty. When neither PKCE
+        // nor OIDC is on, the cookie stays the bare `state` (v0.17
+        // byte-compatible).
         var cookieVal: string = state
-        if (this.UsePkce) {
-            let verifier: string = OAuth2Client.RandomState(32)
-            let challenge: string = OAuth2Client.PkceChallenge(verifier)
-            url = url + "&code_challenge=" + OAuth2Client.UrlEncode(challenge)
-            url = url + "&code_challenge_method=S256"
-            cookieVal = state + "~" + verifier
+        if (this.UsePkce || this.UseOidc) {
+            var verifier: string = ""
+            if (this.UsePkce) {
+                verifier = OAuth2Client.RandomState(32)
+                let challenge: string = OAuth2Client.PkceChallenge(verifier)
+                url = url + "&code_challenge=" + OAuth2Client.UrlEncode(challenge)
+                url = url + "&code_challenge_method=S256"
+            }
+            var nonce: string = ""
+            if (this.UseOidc) {
+                // One-time nonce binds the id_token to THIS login — the
+                // token must echo it back or we reject (replay defence,
+                // OIDC core §3.1.2.1).
+                nonce = OAuth2Client.RandomState(32)
+                url = url + "&nonce=" + OAuth2Client.UrlEncode(nonce)
+            }
+            cookieVal = state + "~" + verifier + "~" + nonce
         }
         // Cookie is short-lived (5 min) — enough for the user to
         // complete the provider auth dance. Strict TTL caps replay.
@@ -211,16 +259,16 @@ public class OAuth2Client {
         let urlState: string = OAuth2Client.QueryValue(req.RawTarget, "state")
         let cookieRaw: string = OAuth2Client.CookieValue(
             req.Header("cookie"), this.StateCookie)
-        // Split the cookie into its state + (PKCE) verifier halves.
-        var cookieState: string = cookieRaw
+        // Split the cookie into [state, pkce_verifier, oidc_nonce].
+        // A bare cookie (no '~') keeps state in field 0 and the rest
+        // empty — v0.17 byte-compatible.
+        let fields: List<string> = OAuth2Client.SplitTilde(cookieRaw)
+        var cookieState: string = ""
         var verifier: string = ""
-        if (this.UsePkce) {
-            let sep: int = String_IndexOf(cookieRaw, "~")
-            if (sep >= 0) {
-                cookieState = String_Substring(cookieRaw, 0, sep)
-                verifier = String_Substring(cookieRaw, sep + 1, String_Length(cookieRaw) - (sep + 1))
-            }
-        }
+        var nonce: string = ""
+        if (fields.Count() > 0) { cookieState = fields.Get(0) }
+        if (fields.Count() > 1) { verifier = fields.Get(1) }
+        if (fields.Count() > 2) { nonce = fields.Get(2) }
         if (String_Length(urlState) == 0 || String_Length(cookieState) == 0) {
             r.Error = "missing state (CSRF check failed)"
             return r
@@ -231,6 +279,10 @@ public class OAuth2Client {
         }
         if (this.UsePkce && String_Length(verifier) == 0) {
             r.Error = "missing PKCE verifier"
+            return r
+        }
+        if (this.UseOidc && String_Length(nonce) == 0) {
+            r.Error = "missing OIDC nonce"
             return r
         }
 
@@ -280,6 +332,28 @@ public class OAuth2Client {
         r.TokenType   = OAuth2Client.JsonStringField(tokenJson, "token_type")
         if (String_Length(r.TokenType) == 0) { r.TokenType = "bearer" }
 
+        // 3b. OIDC: verify the id_token BEFORE trusting anything. The
+        //     id_token is the only signed assertion of identity — an
+        //     access_token is opaque to us. Fail CLOSED: if OIDC is on
+        //     and the id_token is missing or fails any check, the whole
+        //     callback fails (we never fall through to an unverified
+        //     userinfo identity).
+        if (this.UseOidc) {
+            let idToken: string = OAuth2Client.JsonStringField(tokenJson, "id_token")
+            if (String_Length(idToken) == 0) {
+                r.Error = "OIDC: no id_token in token response"
+                return r
+            }
+            if (!this.VerifyIdToken(idToken, nonce, r)) {
+                // VerifyIdToken set r.Error with the specific reason.
+                return r
+            }
+            // id_token verified — its claims are authoritative. We can
+            // skip the userinfo round-trip entirely.
+            r.Ok = true
+            return r
+        }
+
         // 4. Fetch user info with the token. Both Github + Google
         //    expect Authorization: Bearer.
         if (String_Length(this.UserInfoUrl) > 0) {
@@ -316,6 +390,233 @@ public class OAuth2Client {
             return
         }
         // Custom provider — caller parses r.UserInfo themselves.
+    }
+
+    // ── OIDC id_token verification ───────────────────
+
+    // Verify an OIDC id_token (a compact JWS). Returns true + fills the
+    // identity fields of `r` only when EVERY check passes; otherwise
+    // returns false with `r.Error` describing the first failure. The
+    // checks, in order:
+    //   1. Three base64url segments (header.payload.signature) — reject
+    //      a 2-segment JWS-with-detached-payload or a 5-segment JWE.
+    //   2. Header `alg` == "RS256" — HARD pin. Rejecting "none" and any
+    //      HS* defeats the classic algorithm-confusion attack where an
+    //      attacker re-signs with the public key as an HMAC secret.
+    //   3. Signature verifies under the IdP's JWKS key for the header
+    //      `kid` (built verify-only via JwsKey.FromJwkRsa).
+    //   4. iss == this.Issuer (exact).
+    //   5. aud contains this.ClientId (string or array form).
+    //   6. exp is in the future.
+    //   7. nonce == the one we minted in StartLogin (replay defence).
+    private bool VerifyIdToken(idToken: string, wantNonce: string, r: OAuth2Result) {
+        let jwksJson: string = this.FetchJwks()
+        if (String_Length(jwksJson) == 0) {
+            r.Error = "id_token: cannot fetch JWKS"
+            return false
+        }
+        return this.VerifyAgainstJwks(idToken, jwksJson, wantNonce, r)
+    }
+
+    // Network-free OIDC verification against an already-fetched JWKS
+    // document (the `{"keys":[...]}` JSON the IdP serves). Useful when
+    // you cache the JWKS yourself, and the unit-testable core of the
+    // flow. Returns an OAuth2Result (Ok + identity fields, or Error).
+    public OAuth2Result VerifyIdTokenJwks(idToken: string, jwksJson: string, wantNonce: string) {
+        let r = new OAuth2Result()
+        if (this.VerifyAgainstJwks(idToken, jwksJson, wantNonce, r)) { r.Ok = true }
+        return r
+    }
+
+    // The pure verifier: id_token + an in-hand JWKS JSON string → bool.
+    // No network; every failure sets r.Error. See VerifyIdToken's
+    // doc comment for the ordered list of checks. JSON is read with the
+    // package's own flat-field scanner (no Json-stdlib dependency in the
+    // facade — JWK + JWT-claim objects are flat, so it suffices).
+    private bool VerifyAgainstJwks(idToken: string, jwksJson: string, wantNonce: string, r: OAuth2Result) {
+        // 1. Split into 3 dot-separated segments.
+        let segs: List<string> = OAuth2Client.SplitDot(idToken)
+        if (segs.Count() != 3) {
+            r.Error = "id_token: malformed (expected 3 segments)"
+            return false
+        }
+        let hB64: string = segs.Get(0)
+        let pB64: string = segs.Get(1)
+        let sB64: string = segs.Get(2)
+        if (String_Length(hB64) == 0 || String_Length(pB64) == 0 || String_Length(sB64) == 0) {
+            r.Error = "id_token: empty segment"
+            return false
+        }
+
+        // 2. Header → pin alg = RS256.
+        let headerJson: string = Bytes.ToString(Bytes.FromBase64Url(hB64))
+        let alg: string = OAuth2Client.JsonStringField(headerJson, "alg")
+        if (alg != "RS256") {
+            r.Error = "id_token: unsupported alg '" + alg + "' (only RS256 accepted)"
+            return false
+        }
+        let kid: string = OAuth2Client.JsonStringField(headerJson, "kid")
+
+        // 3. Find the JWKS key object for this kid and verify the sig.
+        let jwk: string = OAuth2Client.FindJwkObject(jwksJson, kid)
+        if (String_Length(jwk) == 0) {
+            r.Error = "id_token: no JWKS key for kid '" + kid + "'"
+            return false
+        }
+        if (OAuth2Client.JsonStringField(jwk, "kty") != "RSA") {
+            r.Error = "id_token: JWKS key is not RSA"
+            return false
+        }
+        let nB64: string = OAuth2Client.JsonStringField(jwk, "n")
+        let eB64: string = OAuth2Client.JsonStringField(jwk, "e")
+        let pub: JwsKey = JwsKey.FromJwkRsa(Bytes.FromBase64Url(nB64), Bytes.FromBase64Url(eB64))
+        if (!pub.IsValid()) {
+            r.Error = "id_token: malformed JWKS key"
+            return false
+        }
+        // The JWS signing input is the ASCII "header.payload".
+        let signingInput: List<int> = Bytes.FromString(hB64 + "." + pB64)
+        let sig: List<int> = Bytes.FromBase64Url(sB64)
+        if (!pub.Verify(signingInput, sig)) {
+            r.Error = "id_token: signature invalid"
+            return false
+        }
+
+        // 4–7. Claim checks on the (now trusted) payload.
+        let claims: string = Bytes.ToString(Bytes.FromBase64Url(pB64))
+
+        if (OAuth2Client.JsonStringField(claims, "iss") != this.Issuer) {
+            r.Error = "id_token: issuer mismatch"
+            return false
+        }
+        if (!OAuth2Client.AudienceContains(claims, this.ClientId)) {
+            r.Error = "id_token: audience mismatch"
+            return false
+        }
+        let exp: int = OAuth2Client.JsonNumberField(claims, "exp")
+        let now: int = OAuth2Client.NowUnix()
+        // 60s leeway for clock skew between us and the IdP.
+        if (exp <= 0 || now >= exp + 60) {
+            r.Error = "id_token: expired"
+            return false
+        }
+        if (String_Length(wantNonce) > 0) {
+            if (OAuth2Client.JsonStringField(claims, "nonce") != wantNonce) {
+                r.Error = "id_token: nonce mismatch"
+                return false
+            }
+        }
+
+        // All checks passed — the id_token's claims are authoritative.
+        r.UserInfo = claims
+        r.UserId   = OAuth2Client.JsonStringField(claims, "sub")
+        let cEmail: string = OAuth2Client.JsonStringField(claims, "email")
+        if (String_Length(cEmail) > 0) { r.Email = cEmail }
+        let cName: string = OAuth2Client.JsonStringField(claims, "name")
+        if (String_Length(cName) > 0) { r.Username = cName }
+        return true
+    }
+
+    // Resolve + fetch the IdP's JWKS document, returning the raw JSON
+    // string (`{"keys":[...]}`). On any failure returns "". Uses the
+    // explicit JwksUri when set, else OIDC discovery
+    // (`{issuer}/.well-known/openid-configuration` → `jwks_uri`).
+    private string FetchJwks() {
+        var jwksUrl: string = this.JwksUri
+        if (String_Length(jwksUrl) == 0) {
+            if (String_Length(this.Issuer) == 0) { return "" }
+            let discoUrl: string = this.Issuer + "/.well-known/openid-configuration"
+            let dResp: HttpResponse = HttpClient.Request("GET", discoUrl)
+                .Header("Accept",     "application/json")
+                .Header("User-Agent", "amalgame-web/0.35.0")
+                .Send()
+            if (dResp.StatusCode < 200 || dResp.StatusCode >= 300) { return "" }
+            jwksUrl = OAuth2Client.JsonStringField(dResp.BodyText, "jwks_uri")
+        }
+        if (String_Length(jwksUrl) == 0) { return "" }
+        let jResp: HttpResponse = HttpClient.Request("GET", jwksUrl)
+            .Header("Accept",     "application/json")
+            .Header("User-Agent", "amalgame-web/0.35.0")
+            .Send()
+        if (jResp.StatusCode < 200 || jResp.StatusCode >= 300) { return "" }
+        return jResp.BodyText
+    }
+
+    // Return the `{...}` substring of the first JWK in the set whose
+    // "kid" matches. JWK objects are flat (no nested braces), so the
+    // nearest enclosing braces bound exactly one key. When `kid` is
+    // empty (header carried none) the whole document is returned only
+    // if it holds a single key — otherwise "" (ambiguous, reject).
+    private static string FindJwkObject(jwksJson: string, kid: string) {
+        if (String_Length(kid) > 0) {
+            let marker: string = "\"kid\":\"" + kid + "\""
+            let kpos: int = String_IndexOf(jwksJson, marker)
+            if (kpos < 0) { return "" }
+            // Walk back to the enclosing '{' and forward to its '}'.
+            var start: int = kpos
+            while (start >= 0 && String_Substring(jwksJson, start, 1) != "{") {
+                start = start - 1
+            }
+            var end: int = kpos
+            let n: int = String_Length(jwksJson)
+            while (end < n && String_Substring(jwksJson, end, 1) != "}") {
+                end = end + 1
+            }
+            if (start < 0 || end >= n) { return "" }
+            return String_Substring(jwksJson, start, end - start + 1)
+        }
+        // No kid: accept only an unambiguous single-key set. A second
+        // "kty" occurrence means 2+ keys — reject rather than guess.
+        let first: int = String_IndexOf(jwksJson, "\"kty\"")
+        if (first < 0) { return "" }
+        let rest: string = String_Substring(jwksJson, first + 5, String_Length(jwksJson) - (first + 5))
+        if (String_IndexOf(rest, "\"kty\"") >= 0) { return "" }
+        return jwksJson
+    }
+
+    // True if the `aud` claim contains `clientId` — whether it is a
+    // bare string ("aud":"x") or a JSON array ("aud":["x","y"]).
+    private static bool AudienceContains(claims: string, clientId: string) {
+        let audStr: string = OAuth2Client.JsonStringField(claims, "aud")
+        if (String_Length(audStr) > 0) { return audStr == clientId }
+        // Array form: isolate the "aud":[ ... ] span and look for the
+        // quoted client id inside it.
+        let ai: int = String_IndexOf(claims, "\"aud\"")
+        if (ai < 0) { return false }
+        let tail: string = String_Substring(claims, ai, String_Length(claims) - ai)
+        let lb: int = String_IndexOf(tail, "[")
+        let rb: int = String_IndexOf(tail, "]")
+        if (lb < 0 || rb <= lb) { return false }
+        let arr: string = String_Substring(tail, lb, rb - lb + 1)
+        return String_IndexOf(arr, "\"" + clientId + "\"") >= 0
+    }
+
+    // Current Unix time (seconds). OIDC `exp` is seconds since epoch.
+    private static int NowUnix() {
+        var t: int = 0
+        @c { t = (int64_t) time(NULL); }
+        return t
+    }
+
+    // Split on '.' into segments (for the compact JWS form).
+    private static List<string> SplitDot(s: string) {
+        return OAuth2Client.SplitOn(s, ".")
+    }
+    // Split on '~' into fields (state cookie layout).
+    private static List<string> SplitTilde(s: string) {
+        return OAuth2Client.SplitOn(s, "~")
+    }
+    private static List<string> SplitOn(s: string, sep: string) {
+        let out: List<string> = new List<string>()
+        var cur: string = s
+        var idx: int = String_IndexOf(cur, sep)
+        while (idx >= 0) {
+            out.Add(String_Substring(cur, 0, idx))
+            cur = String_Substring(cur, idx + 1, String_Length(cur) - (idx + 1))
+            idx = String_IndexOf(cur, sep)
+        }
+        out.Add(cur)
+        return out
     }
 
     // ── helpers (URL / cookie / minimal JSON scanner) ─
