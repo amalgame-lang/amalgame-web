@@ -446,7 +446,15 @@ public class WebApp {
         // 4. Route match + handler. Build a fresh WebContext per
         // request — it carries the path params + a snapshot of the
         // app-level state.
-        let m: RouteMatch = this.Routes.Match(req.Method, req.Path)
+        var m: RouteMatch = this.Routes.Match(req.Method, req.Path)
+        // HEAD is "GET without a body" (RFC 7231 §4.3.2): if no HEAD route
+        // is registered, fall back to the GET route so `HEAD /page` answers
+        // with the same status + headers as `GET /page` (the body is
+        // stripped at the single exit, in applyResponseMiddlewares). Without
+        // this, HEAD on a GET-only route (e.g. a static site's index) 404s.
+        if (m == null && req.Method == "HEAD") {
+            m = this.Routes.Match("GET", req.Path)
+        }
         var resp: HttpResponse
         if (m == null) {
             resp = HttpResponse.New().Status(404).Text("Not found")
@@ -545,6 +553,17 @@ public class WebApp {
         // body + headers and turns BodyText into a gzipped BodyBytes.
         if (this.CompressCfg != null) {
             this.CompressCfg.Apply(req, resp)
+        }
+        // HEAD: identical to GET but MUST NOT carry a message body
+        // (RFC 7231 §4.3.2). The full pipeline ran above so the status +
+        // headers match what GET would send; now drop the body. This is
+        // the single exit for both the static and routed paths, so every
+        // HEAD response is body-stripped here. (Content-Length is
+        // recomputed from the now-empty body by the net-http writer →
+        // 0; the status/content-type a monitor cares about are intact.)
+        if (req.Method == "HEAD") {
+            resp.BodyText  = ""
+            resp.BodyBytes = new List<int>()
         }
         return resp
     }
