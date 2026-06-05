@@ -316,6 +316,32 @@ public class Program {
             Console.WriteLine("[FAIL] SignedCookie session: " + String_FromInt(r18.StatusCode))
         }
 
+        // ── 19. HEAD falls back to the GET route + strips the body ──
+        // (RFC 7231 §4.3.2). A GET-only route must answer HEAD with the
+        // same status + headers but no body — not a 404.
+        let app19 = WebApp.New()
+            .Get("/page", ctx => HttpResponse.New().Html("<p>hello body</p>"))
+        let reqHead = new HttpRequest()
+        reqHead.Method = "HEAD"
+        reqHead.Path   = "/page"
+        let rHead: HttpResponse = app19.Handle(reqHead)
+        if (rHead.StatusCode == 200 && rHead.BodyText == "") {
+            Console.WriteLine("[PASS] HEAD matches GET route, status 200, body stripped")
+        } else {
+            Console.WriteLine("[FAIL] HEAD shape: status=" + String_FromInt(rHead.StatusCode)
+                + " bodyLen=" + String_FromInt(String_Length(rHead.BodyText)))
+        }
+        // HEAD on a genuinely missing path is still a 404.
+        let reqHead2 = new HttpRequest()
+        reqHead2.Method = "HEAD"
+        reqHead2.Path   = "/nope"
+        let rHead2: HttpResponse = app19.Handle(reqHead2)
+        if (rHead2.StatusCode == 404) {
+            Console.WriteLine("[PASS] HEAD on missing path still 404")
+        } else {
+            Console.WriteLine("[FAIL] HEAD missing: status=" + String_FromInt(rHead2.StatusCode))
+        }
+
         Console.WriteLine("done")
     }
 }
