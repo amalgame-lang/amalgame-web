@@ -629,3 +629,41 @@ carries `SecurityHeaders` / CORS just like any other response.
   Google, the preset pre-wires the issuer + JWKS, so `.WithOidc()` takes
   no argument. `VerifyIdTokenJwks(idToken, jwksJson, nonce)` exposes the
   network-free verifier (cache the JWKS yourself, or unit-test).
+
+## Input validation (v0.36.0)
+
+`Validator` is a declarative, **pure** input checker — the
+defence-in-depth layer between raw client bytes and your handler logic
+(SQL, templates, the filesystem). It parses and checks; it never
+executes, so it can't itself be an injection sink.
+
+```amalgame
+let v = new Validator()
+v.Field("email").Required().Email()
+v.Field("age").Optional().Int().Range(0, 130)
+v.Field("role").Required().OneOf(["admin", "user"])
+v.Field("bio").Optional().MaxLen(500).AllowMultiline()
+
+let res = v.Check(ctx.Req.Form())          // any Map<string,string>
+if (!res.Ok) {
+    return HttpResponse.New().Status(422).Json(res.ErrorJson())
+}
+let age: int = res.IntOf("age")            // typed, already validated
+```
+
+Rules: `Required` / `Optional`, `Int` / `Float` / `Bool` / `Email`
+(strict parsing — `"12abc"` is **not** an int), `Range`, `MinLen` /
+`MaxLen`, `OneOf(list)` allow-lists, `Alnum` / `Alpha` / `Numeric` char
+classes, `AllowMultiline`. `ValidationResult` gives per-field errors
+(`HasError` / `ErrorOf` / `ErrorSummary` / `ErrorJson`) and normalised
+typed accessors (`Of` / `IntOf` / `BoolOf`).
+
+**Security — every accepted field, by construction:**
+- **length-bounded** — an 8 KiB default cap even with no `MaxLen`
+  (anti-DoS floor against unbounded form fields);
+- **control-char-free** — C0 / DEL bytes are rejected unless the field
+  opts into `AllowMultiline` (shuts header- / log-injection and NUL-byte
+  truncation);
+- **strictly typed**; and
+- optionally **allow-listed** (`OneOf` — the strongest anti-injection
+  control: only known-good values pass).
