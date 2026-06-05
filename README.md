@@ -608,4 +608,11 @@ carries `SecurityHeaders` / CORS just like any other response.
   Read claims in the handler with your own `Json.Parse(jwt.Payload(req))`.
 - **`OAuth2Client`** (authorization-code flow helper) ships in the
   package for login redirects + token exchange; wire its callback as
-  an ordinary route handler.
+  an ordinary route handler. Call `.WithPkce()` to enable **PKCE**
+  (RFC 7636, S256): `StartLogin` then sends a `code_challenge`
+  (`base64url(SHA-256(code_verifier))`) + `code_challenge_method=S256`
+  and stashes the verifier in the signed state cookie; `HandleCallback`
+  replays `code_verifier` in the token exchange. Opt-in (the plain flow
+  is unchanged) but recommended — it shuts the authorization-code
+  interception window even when the client secret is exposed
+  (SPAs / mobile / public clients). Available since web v0.34.0.
