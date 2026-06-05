@@ -88,6 +88,12 @@ public class OAuth2Client {
     // "github" / "google" / "" (generic — no extraction beyond
     // the raw body).
     public Provider:     string
+    // v0.34.0: PKCE (RFC 7636, S256). When on, StartLogin sends a
+    // code_challenge and carries the code_verifier in the state cookie;
+    // HandleCallback replays the verifier in the token exchange. Defends
+    // the auth-code flow against interception. Opt-in (WithPkce) to keep
+    // the existing flow byte-compatible; recommended for public clients.
+    public UsePkce:      bool
 
     public OAuth2Client() {
         this.ClientId     = ""
@@ -99,6 +105,7 @@ public class OAuth2Client {
         this.Scopes       = new List<string>()
         this.StateCookie  = "__oauth_state"
         this.Provider     = ""
+        this.UsePkce      = false
     }
 
     // ── Presets ──────────────────────────────────────
@@ -143,6 +150,9 @@ public class OAuth2Client {
     public OAuth2Client WithTokenUrl(s: string)     { this.TokenUrl     = s; return this }
     public OAuth2Client WithUserInfoUrl(s: string)  { this.UserInfoUrl  = s; return this }
     public OAuth2Client WithRedirectUri(s: string)  { this.RedirectUri  = s; return this }
+    // Enable PKCE (RFC 7636, S256). Recommended for SPAs / mobile /
+    // any public client; harmless for confidential clients too.
+    public OAuth2Client WithPkce()                  { this.UsePkce = true; return this }
     public OAuth2Client WithScopes(xs: List<string>) { this.Scopes = xs; return this }
     public OAuth2Client WithStateCookie(s: string)  { this.StateCookie  = s; return this }
 
@@ -163,9 +173,20 @@ public class OAuth2Client {
         if (String_Length(scopeStr) > 0) {
             url = url + "&scope=" + OAuth2Client.UrlEncode(scopeStr)
         }
+        // PKCE (RFC 7636 S256): send code_challenge in the auth request
+        // and stash the verifier in the state cookie (after a '~' — never
+        // produced by base64url, so it's an unambiguous separator).
+        var cookieVal: string = state
+        if (this.UsePkce) {
+            let verifier: string = OAuth2Client.RandomState(32)
+            let challenge: string = OAuth2Client.PkceChallenge(verifier)
+            url = url + "&code_challenge=" + OAuth2Client.UrlEncode(challenge)
+            url = url + "&code_challenge_method=S256"
+            cookieVal = state + "~" + verifier
+        }
         // Cookie is short-lived (5 min) — enough for the user to
         // complete the provider auth dance. Strict TTL caps replay.
-        let cookie: string = this.StateCookie + "=" + state +
+        let cookie: string = this.StateCookie + "=" + cookieVal +
             "; Path=/; Max-Age=300; HttpOnly; SameSite=Lax; Secure"
         return HttpResponse.New()
             .Status(302)
@@ -188,14 +209,28 @@ public class OAuth2Client {
         //    value we put in StartLogin's URL. Match it against
         //    the cookie. Both must be present + equal.
         let urlState: string = OAuth2Client.QueryValue(req.RawTarget, "state")
-        let cookieState: string = OAuth2Client.CookieValue(
+        let cookieRaw: string = OAuth2Client.CookieValue(
             req.Header("cookie"), this.StateCookie)
+        // Split the cookie into its state + (PKCE) verifier halves.
+        var cookieState: string = cookieRaw
+        var verifier: string = ""
+        if (this.UsePkce) {
+            let sep: int = String_IndexOf(cookieRaw, "~")
+            if (sep >= 0) {
+                cookieState = String_Substring(cookieRaw, 0, sep)
+                verifier = String_Substring(cookieRaw, sep + 1, String_Length(cookieRaw) - (sep + 1))
+            }
+        }
         if (String_Length(urlState) == 0 || String_Length(cookieState) == 0) {
             r.Error = "missing state (CSRF check failed)"
             return r
         }
         if (urlState != cookieState) {
             r.Error = "state mismatch (CSRF check failed)"
+            return r
+        }
+        if (this.UsePkce && String_Length(verifier) == 0) {
+            r.Error = "missing PKCE verifier"
             return r
         }
 
@@ -222,6 +257,9 @@ public class OAuth2Client {
         form.Set("redirect_uri", this.RedirectUri)
         form.Set("client_id",    this.ClientId)
         form.Set("client_secret", this.ClientSecret)
+        if (this.UsePkce) {
+            form.Set("code_verifier", verifier)
+        }
 
         let tokenResp: HttpResponse = HttpClient.Request("POST", this.TokenUrl)
             .Header("Accept",     "application/json")
@@ -281,6 +319,16 @@ public class OAuth2Client {
     }
 
     // ── helpers (URL / cookie / minimal JSON scanner) ─
+
+    // PKCE S256 code_challenge = base64url( SHA-256( code_verifier ) ),
+    // no padding (RFC 7636 §4.2). Built from amalgame-crypto primitives.
+    // Public for direct testing against the RFC 7636 Appendix B vector.
+    public static string PkceChallenge(verifier: string) {
+        let vbytes: List<int> = Bytes.FromString(verifier)
+        let hex: string = Sha256.Hex(vbytes)
+        let dig: List<int> = Bytes.FromHex(hex)
+        return Bytes.ToBase64Url(dig)
+    }
 
     private static string RandomState(nBytes: int) {
         var out: string = ""
