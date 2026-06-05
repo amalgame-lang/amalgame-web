@@ -96,10 +96,11 @@ jobs:
           path: amalgame-logging
 
       # v0.8.3+: SignedCookieSessionStore uses amalgame-crypto (Hmac).
+      # v0.35.0: OAuth2 OIDC uses crypto v0.6.0 JwsKey.FromJwkRsa.
       - uses: actions/checkout@v4
         with:
           repository: amalgame-lang/amalgame-crypto
-          ref: v0.3.0
+          ref: v0.6.0
           path: amalgame-crypto
 
       # v0.8.4+: RedisSessionStore uses amalgame-database-nosql-redis
