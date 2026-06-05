@@ -1,0 +1,166 @@
+// Unit tests for the Validator (v0.36.0). Network-free.
+
+namespace Tests
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.Net.Http
+import Amalgame.Web
+
+public class Program {
+    public static void Main(string[] args) {
+        Console.WriteLine("amalgame-web — Validation tests")
+
+        // ── 1. Happy path: required email + ranged int + enum ──
+        let v = new Validator()
+        v.Field("email").Required().Email()
+        v.Field("age").Optional().Int().Range(0, 130)
+        v.Field("role").Required().OneOf(Program.list2("admin", "user"))
+
+        let good = new Map<string, string>()
+        good.Set("email", "alice@example.com")
+        good.Set("age", "42")
+        good.Set("role", "admin")
+        let r1 = v.Check(good)
+        if (r1.Ok && r1.IntOf("age") == 42 && r1.Of("role") == "admin") {
+            Console.WriteLine("[PASS] valid input passes + typed accessors")
+        } else {
+            Console.WriteLine("[FAIL] happy path: " + r1.ErrorSummary())
+        }
+
+        // ── 2. Missing required field ──
+        let miss = new Map<string, string>()
+        miss.Set("age", "10")
+        miss.Set("role", "user")
+        let r2 = v.Check(miss)
+        if (!r2.Ok && r2.HasError("email")) {
+            Console.WriteLine("[PASS] missing required field rejected")
+        } else {
+            Console.WriteLine("[FAIL] missing required not caught")
+        }
+
+        // ── 3. Bad email ──
+        let bademail = new Map<string, string>()
+        bademail.Set("email", "not-an-email")
+        bademail.Set("role", "user")
+        let r3 = v.Check(bademail)
+        if (!r3.Ok && r3.HasError("email")) {
+            Console.WriteLine("[PASS] invalid email rejected")
+        } else {
+            Console.WriteLine("[FAIL] invalid email accepted")
+        }
+
+        // ── 4. Non-integer / out-of-range int ──
+        let badint = new Map<string, string>()
+        badint.Set("email", "a@b.co")
+        badint.Set("role", "user")
+        badint.Set("age", "12abc")
+        let r4 = v.Check(badint)
+        let oor = new Map<string, string>()
+        oor.Set("email", "a@b.co")
+        oor.Set("role", "user")
+        oor.Set("age", "999")
+        let r4b = v.Check(oor)
+        if (!r4.Ok && r4.HasError("age") && !r4b.Ok && r4b.HasError("age")) {
+            Console.WriteLine("[PASS] non-int + out-of-range rejected")
+        } else {
+            Console.WriteLine("[FAIL] int checks: " + r4.ErrorSummary() + " / " + r4b.ErrorSummary())
+        }
+
+        // ── 5. Enum rejects an unlisted value ──
+        let badrole = new Map<string, string>()
+        badrole.Set("email", "a@b.co")
+        badrole.Set("role", "superadmin")
+        let r5 = v.Check(badrole)
+        if (!r5.Ok && r5.HasError("role")) {
+            Console.WriteLine("[PASS] enum rejects unlisted value")
+        } else {
+            Console.WriteLine("[FAIL] enum accepted bad value")
+        }
+
+        // ── 6. SECURITY: control characters rejected ──
+        // A CRLF in a single-line field is a header/log-injection lever.
+        let cv = new Validator()
+        cv.Field("name").Required()
+        let inj = new Map<string, string>()
+        inj.Set("name", "alice\r\nSet-Cookie: x=1")
+        let r6 = cv.Check(inj)
+        if (!r6.Ok && r6.HasError("name")) {
+            Console.WriteLine("[PASS] control characters rejected (anti-injection)")
+        } else {
+            Console.WriteLine("[FAIL] control characters allowed through")
+        }
+
+        // ── 7. SECURITY: default length cap (anti-DoS) ──
+        let lv = new Validator()
+        lv.Field("bio").Required()       // no MaxLen → 8 KiB default cap
+        var big: string = ""
+        for i in 0..9000 { big = big + "x" }
+        let huge = new Map<string, string>()
+        huge.Set("bio", big)
+        let r7 = lv.Check(huge)
+        if (!r7.Ok && r7.HasError("bio")) {
+            Console.WriteLine("[PASS] default length cap enforced (anti-DoS)")
+        } else {
+            Console.WriteLine("[FAIL] oversized field accepted")
+        }
+
+        // ── 8. Multiline opt-in allows newlines but still caps ctrl ──
+        let mv = new Validator()
+        mv.Field("comment").Required().AllowMultiline().MaxLen(100)
+        let multi = new Map<string, string>()
+        multi.Set("comment", "line one\nline two")
+        let r8 = mv.Check(multi)
+        let nul = new Map<string, string>()
+        nul.Set("comment", "bad\x07byte")   // BEL — control char, not TAB/LF/CR
+        let r8b = mv.Check(nul)
+        if (r8.Ok && !r8b.Ok) {
+            Console.WriteLine("[PASS] multiline allows LF but still blocks NUL")
+        } else {
+            Console.WriteLine("[FAIL] multiline handling: ok=" + (r8.Ok ? "T" : "F"))
+        }
+
+        // ── 9. Bool normalization ──
+        let bv = new Validator()
+        bv.Field("agree").Required().Bool()
+        let bm = new Map<string, string>()
+        bm.Set("agree", "on")
+        let r9 = bv.Check(bm)
+        if (r9.Ok && r9.BoolOf("agree")) {
+            Console.WriteLine("[PASS] bool normalizes on→true")
+        } else {
+            Console.WriteLine("[FAIL] bool normalization")
+        }
+
+        // ── 10. Charset class (alnum) ──
+        let av = new Validator()
+        av.Field("user").Required().Alnum().MaxLen(20)
+        let am = new Map<string, string>()
+        am.Set("user", "alice99")
+        let r10 = av.Check(am)
+        let am2 = new Map<string, string>()
+        am2.Set("user", "alice!")
+        let r10b = av.Check(am2)
+        if (r10.Ok && !r10b.Ok) {
+            Console.WriteLine("[PASS] alnum charset accepts clean, rejects punctuation")
+        } else {
+            Console.WriteLine("[FAIL] alnum charset")
+        }
+
+        // ── 11. ErrorJson shape ──
+        let ej: string = r3.ErrorJson()
+        if (String_IndexOf(ej, "\"errors\"") >= 0 && String_IndexOf(ej, "email") >= 0) {
+            Console.WriteLine("[PASS] ErrorJson carries field errors")
+        } else {
+            Console.WriteLine("[FAIL] ErrorJson shape: " + ej)
+        }
+
+        Console.WriteLine("done")
+    }
+
+    static List<string> list2(a: string, b: string) {
+        let xs = new List<string>()
+        xs.Add(a); xs.Add(b)
+        return xs
+    }
+}
