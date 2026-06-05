@@ -109,6 +109,27 @@ public class Program {
             Console.WriteLine("[FAIL] missing state not caught: err=" + r3.Error)
         }
 
+        // ── 8. PKCE S256 challenge — RFC 7636 Appendix B vector ──
+        let chal: string = OAuth2Client.PkceChallenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk")
+        if (chal == "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM") {
+            Console.WriteLine("[PASS] PKCE S256 challenge matches RFC 7636 vector")
+        } else {
+            Console.WriteLine("[FAIL] PKCE challenge: " + chal)
+        }
+
+        // ── 9. StartLogin WithPkce → code_challenge + verifier cookie ──
+        let ghp: OAuth2Client = OAuth2Client.Github("cid", "sec", "https://app/cb").WithPkce()
+        let presp: HttpResponse = ghp.StartLogin(new HttpRequest())
+        let ploc: string = presp.Headers.Get("Location")
+        let pck: string = presp.Headers.Get("Set-Cookie")
+        if (String_IndexOf(ploc, "code_challenge=") >= 0
+            && String_IndexOf(ploc, "code_challenge_method=S256") >= 0
+            && String_IndexOf(pck, "~") >= 0) {
+            Console.WriteLine("[PASS] StartLogin+PKCE: code_challenge S256 in URL, verifier in cookie")
+        } else {
+            Console.WriteLine("[FAIL] PKCE StartLogin shape")
+        }
+
         Console.WriteLine("done")
     }
 }
