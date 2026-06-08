@@ -50,6 +50,21 @@ import Amalgame.String
 import Amalgame.Net.Http
 import Amalgame.Crypto
 
+// RandomState() fills bytes from the OS CSPRNG. On POSIX that's
+// /dev/urandom (open/read from <fcntl.h>/<unistd.h>); on Windows there
+// is no /dev/urandom, so we use CNG's BCryptGenRandom (<bcrypt.h>, linked
+// via -lbcrypt). Pull the right headers in per platform so the @c block
+// in RandomState compiles on both.
+@c {
+    #ifdef _WIN32
+        #include <windows.h>
+        #include <bcrypt.h>
+    #else
+        #include <fcntl.h>
+        #include <unistd.h>
+    #endif
+}
+
 public class OAuth2Result {
     public Ok:           bool
     public Error:        string
@@ -637,7 +652,16 @@ public class OAuth2Client {
             unsigned char buf[64];
             if (nBytes > 64) nBytes = 64;
             if (nBytes <  8) nBytes =  8;
-            /* Fill from /dev/urandom — block-free, kernel-blessed. */
+            /* Fill from the OS CSPRNG — block-free, kernel-blessed. */
+        #ifdef _WIN32
+            /* Windows has no /dev/urandom; use CNG (BCryptGenRandom). */
+            if (!BCRYPT_SUCCESS(BCryptGenRandom(NULL, buf, (ULONG) nBytes,
+                                                BCRYPT_USE_SYSTEM_PREFERRED_RNG))) {
+                static int seeded = 0;
+                if (!seeded) { srand((unsigned) time(NULL)); seeded = 1; }
+                for (int i = 0; i < nBytes; i++) buf[i] = (unsigned char) rand();
+            }
+        #else
             int fd = open("/dev/urandom", O_RDONLY);
             ssize_t r = (fd >= 0) ? read(fd, buf, (size_t) nBytes) : -1;
             if (fd >= 0) close(fd);
@@ -649,6 +673,7 @@ public class OAuth2Client {
                 if (!seeded) { srand((unsigned) time(NULL) ^ (unsigned) getpid()); seeded = 1; }
                 for (int i = 0; i < nBytes; i++) buf[i] = (unsigned char) rand();
             }
+        #endif
             /* base64url encode without padding. */
             static const char b64[] =
                 "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
