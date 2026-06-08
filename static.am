@@ -54,6 +54,15 @@ import Amalgame.IO
 import Amalgame.Net.Http
 import Amalgame.DateTime
 
+// realContained() canonicalises paths to enforce the static root jail.
+// POSIX uses realpath(3) (<stdlib.h>); Windows (MinGW) has no realpath,
+// so we use _fullpath (also <stdlib.h>). Pull the headers in explicitly
+// so the @c block below compiles on both.
+@c {
+    #include <stdlib.h>
+    #include <string.h>
+}
+
 public class Static {
     public Prefix:        string  // URL prefix, normalized to start with "/" and NOT end with "/"
     public Root:          string  // filesystem root, absolute or relative
@@ -393,12 +402,28 @@ public class Static {
         @c {
             char rp[4096];
             char rr[4096];
+        #ifdef _WIN32
+            /* No realpath on MinGW; _fullpath resolves "." / ".." (not
+             * symlinks, which are rare on Windows). Paths come back with
+             * backslashes — normalise to '/' so the boundary test matches,
+             * and compare case-insensitively (NTFS is case-insensitive). */
+            if (_fullpath(rp, path, sizeof(rp)) != NULL && _fullpath(rr, root, sizeof(rr)) != NULL) {
+                for (char* q = rp; *q; q++) { if (*q == '\\') *q = '/'; }
+                for (char* q = rr; *q; q++) { if (*q == '\\') *q = '/'; }
+                size_t lr = strlen(rr);
+                if (lr > 0 && rr[lr - 1] == '/') { lr--; }
+                if (_strnicmp(rp, rr, lr) == 0 && (rp[lr] == '\0' || rp[lr] == '/')) {
+                    ok = true;
+                }
+            }
+        #else
             if (realpath(path, rp) != NULL && realpath(root, rr) != NULL) {
                 size_t lr = strlen(rr);
                 if (strncmp(rp, rr, lr) == 0 && (rp[lr] == '\0' || rp[lr] == '/')) {
                     ok = true;
                 }
             }
+        #endif
         }
         return ok
     }
