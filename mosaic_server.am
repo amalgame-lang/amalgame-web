@@ -215,7 +215,14 @@ public class MosaicServer {
                     rr.WriteToH1Conn(conn)
                     return 0
                 }
-                Http1.Serve(80, redirect)
+                // :80 robuste : multi-thread + timeouts (header/idle). Sans
+                // ça, une seule connexion muette (scan de port) fige la boucle
+                // d'accept série de Http1.Serve → la file se sature et :80 ne
+                // répond plus (redirect mort + challenge ACME voué à échouer).
+                let cfgBase: AmalgameNetHttpServerConfig = HttpServerConfig.Default()
+                let cfgHdr:  AmalgameNetHttpServerConfig = HttpServerConfig.WithHeaderTimeoutSec(cfgBase, 5)
+                let cfg80:   AmalgameNetHttpServerConfig = HttpServerConfig.WithIdleTimeoutSec(cfgHdr, 10)
+                Http1.ServeMtWith(80, cfg80, redirect)
                 return 0
             }
             Threading.ThreadSpawn(redirectWorker, 0)
