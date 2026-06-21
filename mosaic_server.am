@@ -215,14 +215,17 @@ public class MosaicServer {
                     rr.WriteToH1Conn(conn)
                     return 0
                 }
-                // :80 robuste : multi-thread + timeouts (header/idle). Sans
-                // ça, une seule connexion muette (scan de port) fige la boucle
-                // d'accept série de Http1.Serve → la file se sature et :80 ne
-                // répond plus (redirect mort + challenge ACME voué à échouer).
+                // :80 robuste : pool de workers BORNÉ (Http1.ServePool). Un
+                // nombre fixe de threads accept→servent sur la même socket ;
+                // une connexion muette (scan/slowloris) est larguée au header-
+                // timeout (5 s) et le backlog noyau absorbe les pics — plus de
+                // spawn illimité de threads (l'ancien ServeMtWith créait un
+                // thread par connexion sans plafond → épuisement threads/RAM
+                // sous charge → boucle d'accept figée). Pas de keep-alive ici
+                // (idle=0) : un redirect 301 se sert puis se ferme.
                 let cfgBase: AmalgameNetHttpServerConfig = HttpServerConfig.Default()
-                let cfgHdr:  AmalgameNetHttpServerConfig = HttpServerConfig.WithHeaderTimeoutSec(cfgBase, 5)
-                let cfg80:   AmalgameNetHttpServerConfig = HttpServerConfig.WithIdleTimeoutSec(cfgHdr, 10)
-                Http1.ServeMtWith(80, cfg80, redirect)
+                let cfg80:   AmalgameNetHttpServerConfig = HttpServerConfig.WithHeaderTimeoutSec(cfgBase, 5)
+                Http1.ServePool(80, cfg80, redirect, 64)
                 return 0
             }
             Threading.ThreadSpawn(redirectWorker, 0)
@@ -264,16 +267,14 @@ public class MosaicServer {
             return 0
         }
 
-        while (HttpsH1Server.IsListening(srv) && !Http1.IsStopping()) {
-            let conn = HttpsH1Server.Accept(srv)
-            if (conn != null) {
-                let serveWorker = (_a: int) => {
-                    HttpsH1Server.ServeConnOn(conn, handler, 5)
-                    return 0
-                }
-                Threading.ThreadSpawn(serveWorker, 0)
-            }
-        }
+        // Pool de workers BORNÉ : 512 threads fixes qui accept→servent tous
+        // sur la même socket :443 (handshake TLS dans le worker → parallèle),
+        // chaque connexion en keep-alive (idle 5 s). Concurrence PLAFONNÉE à
+        // 512 ; au-delà, backpressure via le backlog noyau puis refus TCP.
+        // Remplace l'ancienne boucle accept + ThreadSpawn-par-connexion NON
+        // bornée qui, sous le trafic, épuisait threads/RAM et figeait tout le
+        // serveur. ServePool bloque jusqu'au shutdown (SIGTERM → IsStopping).
+        HttpsH1Server.ServePool(srv, handler, 5, 512)
         HttpsH1Server.Close(srv)
         return 0
     }
