@@ -57,10 +57,14 @@ jobs:
       # Handler signature). Checkout the sibling repo so the test
       # runner picks it up via the `$AMALGAME_NET_HTTP` env override
       # set below.
+      # Pin must be >= the net-http floor declared in amalgame.toml:
+      # MosaicServer.ServeHttps (v0.37.0+) calls Http1.ServePool /
+      # HttpsH1Server.ServePool, added in net-http v0.29.0 — building
+      # against an older net-http leaves those symbols undefined at link.
       - uses: actions/checkout@v4
         with:
           repository: amalgame-lang/amalgame-net-http
-          ref: v0.16.0
+          ref: v0.29.2
           path: amalgame-net-http
 
       # v0.17.0+: OAuth2Client hits HTTPS endpoints via
