@@ -39,6 +39,8 @@ public class MosaicServer {
     public CertDir:      string                // <CertDir>/<domain>/{fullchain,privkey}.pem
     public WwwCanonical: bool                  // www.x → x (308)
     public HttpRedirect: bool                  // run a :80 → :443 redirect
+    public Workers:      int                   // HTTPS worker-pool size (fixed threads); 0 → runtime default
+    public Backlog:      int                   // kernel listen() backlog on :443; 0 → OS default
 
     public MosaicServer() {
         this.Sites        = new Map<string, WebApp>()
@@ -47,6 +49,8 @@ public class MosaicServer {
         this.CertDir      = "/var/mosaic/certs"
         this.WwwCanonical = true
         this.HttpRedirect = true
+        this.Workers      = 512    // matches the historical ServePool default
+        this.Backlog      = 0      // OS default
     }
 
     public static MosaicServer New() { return new MosaicServer() }
@@ -61,6 +65,13 @@ public class MosaicServer {
     public MosaicServer WithCertDir(string d)         { this.CertDir = d; return this }
     public MosaicServer WithWwwCanonical(bool on)     { this.WwwCanonical = on; return this }
     public MosaicServer WithHttpRedirect(bool on)     { this.HttpRedirect = on; return this }
+    // HTTPS serving pool. Workers = number of fixed accept→serve threads on
+    // :443 (concurrency ceiling; runtime clamps to 1..4096, 0 → default 256).
+    // Backlog = kernel listen() queue depth (the `queue_size` knob). Both
+    // default to the historical behaviour, so callers that never set them are
+    // unaffected.
+    public MosaicServer WithWorkers(int n)            { this.Workers = n; return this }
+    public MosaicServer WithBacklog(int n)            { this.Backlog = n; return this }
 
     // Bind a fully-configured WebApp (its own middleware) to one or more
     // hosts. Each host is also registered as a domain (for SNI + ACME),
@@ -231,7 +242,7 @@ public class MosaicServer {
             Threading.ThreadSpawn(redirectWorker, 0)
         }
 
-        let srv = HttpsH1Server.Listen(port, defCert, defKey, 0)
+        let srv = HttpsH1Server.Listen(port, defCert, defKey, this.Backlog)
         if (!HttpsH1Server.IsListening(srv)) {
             Console.WriteError("MosaicServer: listen failed on :" + String_FromInt(port)
                 + " (missing cert? need root for <1024?)")
@@ -267,14 +278,15 @@ public class MosaicServer {
             return 0
         }
 
-        // Pool de workers BORNÉ : 512 threads fixes qui accept→servent tous
-        // sur la même socket :443 (handshake TLS dans le worker → parallèle),
-        // chaque connexion en keep-alive (idle 5 s). Concurrence PLAFONNÉE à
-        // 512 ; au-delà, backpressure via le backlog noyau puis refus TCP.
-        // Remplace l'ancienne boucle accept + ThreadSpawn-par-connexion NON
-        // bornée qui, sous le trafic, épuisait threads/RAM et figeait tout le
-        // serveur. ServePool bloque jusqu'au shutdown (SIGTERM → IsStopping).
-        HttpsH1Server.ServePool(srv, handler, 5, 512)
+        // Pool de workers BORNÉ : `this.Workers` threads fixes (512 par défaut)
+        // qui accept→servent tous sur la même socket :443 (handshake TLS dans
+        // le worker → parallèle), chaque connexion en keep-alive (idle 5 s).
+        // Concurrence PLAFONNÉE à `this.Workers` ; au-delà, backpressure via le
+        // backlog noyau (`this.Backlog`) puis refus TCP. Remplace l'ancienne
+        // boucle accept + ThreadSpawn-par-connexion NON bornée qui, sous le
+        // trafic, épuisait threads/RAM et figeait tout le serveur. ServePool
+        // bloque jusqu'au shutdown (SIGTERM → IsStopping).
+        HttpsH1Server.ServePool(srv, handler, 5, this.Workers)
         HttpsH1Server.Close(srv)
         return 0
     }
