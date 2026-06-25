@@ -35,6 +35,7 @@ import Amalgame.Net.Http
 public class MosaicServer {
     public Sites:        Map<string, WebApp>   // bare host → app
     public Handlers:     Map<string, Closure<HttpRequest, HttpResponse>>  // bare host → raw handler (e.g. reverse proxy)
+    public SseRoutes:    Map<string, List<SseRoute>>  // bare host → SSE routes (hijack the conn, push frames)
     public Domains:      List<string>          // ordered: SNI, [0] = default cert
     public CertDir:      string                // <CertDir>/<domain>/{fullchain,privkey}.pem
     public WwwCanonical: bool                  // www.x → x (308)
@@ -45,6 +46,7 @@ public class MosaicServer {
     public MosaicServer() {
         this.Sites        = new Map<string, WebApp>()
         this.Handlers     = new Map<string, Closure<HttpRequest, HttpResponse>>()
+        this.SseRoutes    = new Map<string, List<SseRoute>>()
         this.Domains      = new List<string>()
         this.CertDir      = "/var/mosaic/certs"
         this.WwwCanonical = true
@@ -112,6 +114,52 @@ public class MosaicServer {
             }
         }
         return this
+    }
+
+    // Bind a Server-Sent Events route (GET, exact path) to one or more
+    // hosts. SSE handlers don't fit the request→HttpResponse model: they
+    // hijack the connection, open an SseConn and loop Send()-ing frames
+    // until the peer disconnects — so they live in a table parallel to
+    // Handlers/Sites and are dispatched BEFORE the normal response
+    // pipeline (mirrors WebApp.Sse, but for the raw-handler mounting that
+    // a custom server like a groupware uses instead of a WebApp/Router).
+    // Each non-`www.` host is registered as a domain (for SNI + ACME),
+    // like AddHandler — harmless if AddHandler already registered it.
+    public MosaicServer AddSseRoute(List<string> hosts, string path, Closure<SseConn, int> handler) {
+        let n: int = hosts.Count()
+        for i in 0..n {
+            let h: string = hosts.Get(i)
+            if (!this.SseRoutes.Has(h)) { this.SseRoutes.Set(h, new List<SseRoute>()) }
+            this.SseRoutes.Get(h).Add(SseRoute.New(path, handler))
+            if (!this.isWwwAlias(h) && !this.Sites.Has(h) && !this.Handlers.Has(h)) {
+                this.Domains.Add(h)
+            }
+        }
+        return this
+    }
+
+    // Resolve host (strip port, fold `www.` to apex) → matching SSE route
+    // for a GET request at `path`; null if none. Called in the serving
+    // loop before FromH1Conn/Dispatch so a match hijacks the connection.
+    SseRoute matchSseHost(string host, string method, string path) {
+        if (method != "GET") { return null }
+        var h: string = host
+        let colon: int = String_IndexOf(h, ":")
+        if (colon >= 0) { h = String_Substring(h, 0, colon) }
+        var routes: List<SseRoute> = null
+        if (this.SseRoutes.Has(h)) { routes = this.SseRoutes.Get(h) }
+        else if (this.WwwCanonical && this.isWwwAlias(h)) {
+            let bare: string = String_Substring(h, 4, String_Length(h) - 4)
+            if (this.SseRoutes.Has(bare)) { routes = this.SseRoutes.Get(bare) }
+        }
+        if (routes == null) { return null }
+        var i: int = 0
+        while (i < routes.Count()) {
+            let r: SseRoute = routes.Get(i)
+            if (r.Path == path) { return r }
+            i = i + 1
+        }
+        return null
     }
 
     // True when `bareHost` resolves to a site or a raw handler.
@@ -194,6 +242,13 @@ public class MosaicServer {
         let handler = conn => {
             let host: string = H1Conn.Header(conn, "host")
             let req: HttpRequest = HttpRequest.FromH1Conn(conn)
+            let sr: SseRoute = router.matchSseHost(host, req.Method, req.Path)
+            if (sr != null) {
+                let sc: SseConn = SseConn.Open(conn)
+                let sh: Closure<SseConn, int> = sr.Handler
+                sh(sc)
+                return 0
+            }
             let resp: HttpResponse = router.Dispatch(host, req)
             resp.WriteToH1Conn(conn)
             return 0
@@ -273,6 +328,13 @@ public class MosaicServer {
                 }
             }
             let req: HttpRequest = HttpRequest.FromH1Conn(conn)
+            let sr: SseRoute = router.matchSseHost(host, req.Method, req.Path)
+            if (sr != null) {
+                let sc: SseConn = SseConn.Open(conn)
+                let sh: Closure<SseConn, int> = sr.Handler
+                sh(sc)
+                return 0
+            }
             let resp: HttpResponse = router.Dispatch(host, req)
             resp.WriteToH1Conn(conn)
             return 0
