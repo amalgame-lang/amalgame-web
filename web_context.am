@@ -94,4 +94,17 @@ public class WebContext {
     public HttpResponse RenderString(string src, Map<string, string> data) {
         return HttpResponse.New().Html(Template.RenderString(src, data))
     }
+
+    // v0.40.0: render a template file with a TemplateContext (adds
+    // list-bound `{{#key}}` sections on top of the flat-map behavior
+    // of Render()). `let ctx = TemplateContext.FromData(data).WithList(...)`.
+    public HttpResponse RenderContext(string templatePath, TemplateContext ctx) {
+        let t: Template = Template.FromFile(templatePath)
+        return HttpResponse.New().Html(t.RenderContext(ctx))
+    }
+
+    // Render an inline template source string with a TemplateContext.
+    public HttpResponse RenderStringContext(string src, TemplateContext ctx) {
+        return HttpResponse.New().Html(Template.RenderStringContext(src, ctx))
+    }
 }
