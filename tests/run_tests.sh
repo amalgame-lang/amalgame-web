@@ -51,7 +51,7 @@ NETHTTP_DIR=""
 if [ -n "$AMALGAME_NET_HTTP" ] && [ -d "$AMALGAME_NET_HTTP" ]; then
     NETHTTP_DIR="$AMALGAME_NET_HTTP"
 elif [ -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-net-http" ]; then
-    NETHTTP_DIR="$(ls -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-net-http"/*/ 2>/dev/null | head -1)"
+    NETHTTP_DIR="$(ls -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-net-http"/*/ 2>/dev/null | sort -V | tail -1)"
     NETHTTP_DIR="${NETHTTP_DIR%/}"
 elif [ -d "$PKG_DIR/../amalgame-net-http" ]; then
     NETHTTP_DIR="$PKG_DIR/../amalgame-net-http"
@@ -70,7 +70,7 @@ if [ -n "$AMALGAME_TLS" ] && [ -d "$AMALGAME_TLS" ]; then
 elif [ -d "$PKG_DIR/../amalgame-tls" ]; then
     TLS_DIR="$PKG_DIR/../amalgame-tls"
 elif compgen -G "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-tls/*/runtime" > /dev/null 2>&1; then
-    TLS_DIR="$(ls -d $HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-tls/*/ 2>/dev/null | head -1)"
+    TLS_DIR="$(ls -d $HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-tls/*/ 2>/dev/null | sort -V | tail -1)"
     TLS_DIR="${TLS_DIR%/}"
 fi
 if [ -z "$TLS_DIR" ] || [ ! -d "$TLS_DIR/runtime" ]; then
@@ -85,7 +85,7 @@ DATETIME_DIR=""
 if [ -n "$AMALGAME_DATETIME" ] && [ -d "$AMALGAME_DATETIME" ]; then
     DATETIME_DIR="$AMALGAME_DATETIME"
 elif [ -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-datetime" ]; then
-    DATETIME_DIR="$(ls -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-datetime"/*/ 2>/dev/null | head -1)"
+    DATETIME_DIR="$(ls -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-datetime"/*/ 2>/dev/null | sort -V | tail -1)"
     DATETIME_DIR="${DATETIME_DIR%/}"
 elif [ -d "$PKG_DIR/../amalgame-datetime" ]; then
     DATETIME_DIR="$PKG_DIR/../amalgame-datetime"
@@ -101,7 +101,7 @@ RANDOM_DIR=""
 if [ -n "$AMALGAME_RANDOM" ] && [ -d "$AMALGAME_RANDOM" ]; then
     RANDOM_DIR="$AMALGAME_RANDOM"
 elif [ -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-random" ]; then
-    RANDOM_DIR="$(ls -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-random"/*/ 2>/dev/null | head -1)"
+    RANDOM_DIR="$(ls -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-random"/*/ 2>/dev/null | sort -V | tail -1)"
     RANDOM_DIR="${RANDOM_DIR%/}"
 elif [ -d "$PKG_DIR/../amalgame-random" ]; then
     RANDOM_DIR="$PKG_DIR/../amalgame-random"
@@ -117,7 +117,7 @@ LOGGING_DIR=""
 if [ -n "$AMALGAME_LOGGING" ] && [ -d "$AMALGAME_LOGGING" ]; then
     LOGGING_DIR="$AMALGAME_LOGGING"
 elif [ -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-logging" ]; then
-    LOGGING_DIR="$(ls -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-logging"/*/ 2>/dev/null | head -1)"
+    LOGGING_DIR="$(ls -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-logging"/*/ 2>/dev/null | sort -V | tail -1)"
     LOGGING_DIR="${LOGGING_DIR%/}"
 elif [ -d "$PKG_DIR/../amalgame-logging" ]; then
     LOGGING_DIR="$PKG_DIR/../amalgame-logging"
@@ -135,7 +135,7 @@ CRYPTO_DIR=""
 if [ -n "$AMALGAME_CRYPTO" ] && [ -d "$AMALGAME_CRYPTO" ]; then
     CRYPTO_DIR="$AMALGAME_CRYPTO"
 elif [ -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-crypto" ]; then
-    CRYPTO_DIR="$(ls -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-crypto"/*/ 2>/dev/null | head -1)"
+    CRYPTO_DIR="$(ls -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-crypto"/*/ 2>/dev/null | sort -V | tail -1)"
     CRYPTO_DIR="${CRYPTO_DIR%/}"
 elif [ -d "$PKG_DIR/../amalgame-crypto" ]; then
     CRYPTO_DIR="$PKG_DIR/../amalgame-crypto"
@@ -155,7 +155,7 @@ REDIS_DIR=""
 if [ -n "$AMALGAME_DB_REDIS" ] && [ -d "$AMALGAME_DB_REDIS" ]; then
     REDIS_DIR="$AMALGAME_DB_REDIS"
 elif [ -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-database-nosql-redis" ]; then
-    REDIS_DIR="$(ls -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-database-nosql-redis"/*/ 2>/dev/null | head -1)"
+    REDIS_DIR="$(ls -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-database-nosql-redis"/*/ 2>/dev/null | sort -V | tail -1)"
     REDIS_DIR="${REDIS_DIR%/}"
 elif [ -d "$PKG_DIR/../amalgame-database-nosql-redis" ]; then
     REDIS_DIR="$PKG_DIR/../amalgame-database-nosql-redis"
@@ -172,7 +172,7 @@ COMPRESS_DIR=""
 if [ -n "$AMALGAME_COMPRESS" ] && [ -d "$AMALGAME_COMPRESS" ]; then
     COMPRESS_DIR="$AMALGAME_COMPRESS"
 elif [ -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-compress" ]; then
-    COMPRESS_DIR="$(ls -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-compress"/*/ 2>/dev/null | head -1)"
+    COMPRESS_DIR="$(ls -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-compress"/*/ 2>/dev/null | sort -V | tail -1)"
     COMPRESS_DIR="${COMPRESS_DIR%/}"
 elif [ -d "$PKG_DIR/../amalgame-compress" ]; then
     COMPRESS_DIR="$PKG_DIR/../amalgame-compress"
@@ -194,7 +194,7 @@ THREADING_DIR=""
 if [ -n "$AMALGAME_THREADING" ] && [ -d "$AMALGAME_THREADING" ]; then
     THREADING_DIR="$AMALGAME_THREADING"
 elif [ -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-threading" ]; then
-    THREADING_DIR="$(ls -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-threading"/*/ 2>/dev/null | head -1)"
+    THREADING_DIR="$(ls -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-threading"/*/ 2>/dev/null | sort -V | tail -1)"
     THREADING_DIR="${THREADING_DIR%/}"
 elif [ -d "$PKG_DIR/../amalgame-threading" ]; then
     THREADING_DIR="$PKG_DIR/../amalgame-threading"
@@ -213,7 +213,7 @@ ASYNC_DIR=""
 if [ -n "$AMALGAME_ASYNC" ] && [ -d "$AMALGAME_ASYNC" ]; then
     ASYNC_DIR="$AMALGAME_ASYNC"
 elif [ -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-async" ]; then
-    ASYNC_DIR="$(ls -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-async"/*/ 2>/dev/null | head -1)"
+    ASYNC_DIR="$(ls -d "$HOME/.amalgame/packages/github.com/amalgame-lang/amalgame-async"/*/ 2>/dev/null | sort -V | tail -1)"
     ASYNC_DIR="${ASYNC_DIR%/}"
 elif [ -d "$PKG_DIR/../amalgame-async" ]; then
     ASYNC_DIR="$PKG_DIR/../amalgame-async"
