@@ -134,6 +134,48 @@ public class Program {
         failed = failed + Program.check("unknown filter falls back to HTML escape",
             Template.RenderString(LB + "x|bogus" + RB, fx), "&lt;b&gt;")
 
+        // ── 9. List iteration (v0.40.0) ──────────────────────────
+        let rowTpl: string = LB + "#articles" + RB
+            + "<li>" + LB + "title" + RB + "</li>"
+            + LB + "/articles" + RB
+        var page: Map<string, string> = new Map<string, string>()
+        page.Set("siteName", "Le Rugisseur")
+        var rows: List<Map<string, string>> = new List<Map<string, string>>()
+        var r1: Map<string, string> = new Map<string, string>()
+        r1.Set("title", "<b>Un</b>")
+        rows.Add(r1)
+        var r2: Map<string, string> = new Map<string, string>()
+        r2.Set("title", "Deux")
+        rows.Add(r2)
+        var ctxList: TemplateContext = TemplateContext.FromData(page).WithList("articles", rows)
+        failed = failed + Program.check("list iteration, escaped per row",
+            Template.RenderStringContext(rowTpl, ctxList),
+            "<li>&lt;b&gt;Un&lt;&#47;b&gt;</li><li>Deux</li>")
+
+        // Empty list: {{#key}} renders nothing, {{^key}} renders once.
+        var emptyRows: List<Map<string, string>> = new List<Map<string, string>>()
+        var ctxEmpty: TemplateContext = TemplateContext.FromData(page).WithList("articles", emptyRows)
+        failed = failed + Program.check("empty list, # section → nothing",
+            Template.RenderStringContext(rowTpl, ctxEmpty), "")
+        let emptyTpl: string = LB + "^articles" + RB + "no articles" + LB + "/articles" + RB
+        failed = failed + Program.check("empty list, ^ section → empty-state",
+            Template.RenderStringContext(emptyTpl, ctxEmpty), "no articles")
+
+        // Row fields shadow the outer scope; outer scope stays reachable.
+        let scopeTpl: string = LB + "siteName" + RB + ":"
+            + LB + "#articles" + RB + LB + "siteName" + RB + LB + "/articles" + RB
+        var r3: Map<string, string> = new Map<string, string>()
+        r3.Set("siteName", "Article A")
+        var rows2: List<Map<string, string>> = new List<Map<string, string>>()
+        rows2.Add(r3)
+        var ctxShadow: TemplateContext = TemplateContext.FromData(page).WithList("articles", rows2)
+        failed = failed + Program.check("row shadows outer scope",
+            Template.RenderStringContext(scopeTpl, ctxShadow), "Le Rugisseur:Article A")
+
+        // Render(Map) unaffected — plain boolean sections still work.
+        failed = failed + Program.check("Render(Map) unaffected by TemplateContext addition",
+            Template.RenderString(secShow, on), "yes")
+
         // ── Summary ──────────────────────────────────────────────
         Console.WriteLine("")
         Console.WriteLine("failed=" + String_FromInt(failed))

@@ -15,9 +15,20 @@
 //   {{>name}}      partial: a registered template inlined here
 //
 // Truthiness over a Map<string,string>: key present AND value not in
-// { "", "false", "0" }. List iteration (a section repeating per row)
-// needs a richer context than Map<string,string>; it lands with a
-// future RenderCtx — documented, not faked here.
+// { "", "false", "0" }.
+//
+// v0.40.0 — list iteration. `{{#key}}…{{/key}}` repeats its block once
+// per row when `key` is bound to a list of rows instead of a scalar:
+//   var ctx = TemplateContext.FromData(pageData)
+//       .WithList("articles", rows)   // List<Map<string,string>>
+//   Template.Parse(src).RenderContext(ctx)
+// Each row's fields shadow the outer scope inside the block (a `title`
+// key on the row wins over an outer `title`) — everything else in the
+// outer scope (site name, nav, …) stays reachable. `{{#key}}` with zero
+// rows renders nothing; `{{^key}}` with zero rows renders once (empty
+// state); a `key` absent from Lists falls back to the v0.24.0 boolean
+// behavior on Data, unchanged. `Render(Map<string,string>)` keeps
+// working exactly as before — TemplateContext is opt-in.
 //
 // Load order: amalgame.toml `sources` must list template.am before
 // web_context.am (WebContext.Render returns a Template-rendered body).
@@ -26,6 +37,29 @@ namespace Amalgame.Web
 
 import Amalgame.Collections
 import Amalgame.IO
+
+// A render context: flat scalar data (v0.24.0 behavior) plus, since
+// v0.40.0, named lists of rows for `{{#key}}` iteration. Both maps are
+// looked up by the same `key` namespace — binding "articles" in Lists
+// makes `{{#articles}}` iterate instead of testing truthiness.
+public class TemplateContext {
+    public Data:  Map<string, string>
+    public Lists: Map<string, List<Map<string, string>>>
+
+    public TemplateContext(Map<string, string> data, Map<string, List<Map<string, string>>> lists) {
+        this.Data  = data
+        this.Lists = lists
+    }
+
+    public static TemplateContext FromData(Map<string, string> data) {
+        return new TemplateContext(data, new Map<string, List<Map<string, string>>>())
+    }
+
+    public TemplateContext WithList(string key, List<Map<string, string>> rows) {
+        this.Lists.Set(key, rows)
+        return this
+    }
+}
 
 // Bounds partial recursion so a self-referential partial can't loop
 // forever. Generous for real templates, cheap insurance otherwise.
@@ -58,12 +92,23 @@ public class Template {
 
     // ── Rendering ───────────────────────────────────────────────────
     public string Render(Map<string, string> data) {
-        return this.renderSpan(this.Source, data, 0)
+        return this.RenderContext(TemplateContext.FromData(data))
+    }
+
+    // v0.40.0 — render with list-bound sections. See the file header
+    // for `{{#key}}` iteration semantics.
+    public string RenderContext(TemplateContext ctx) {
+        return this.renderSpan(this.Source, ctx, 0)
     }
 
     public static string RenderString(string src, Map<string, string> data) {
         var t: Template = Template.Parse(src)
         return t.Render(data)
+    }
+
+    public static string RenderStringContext(string src, TemplateContext ctx) {
+        var t: Template = Template.Parse(src)
+        return t.RenderContext(ctx)
     }
 
     // HTML-escape & < > " ' / — the last two cover single-quoted
@@ -177,7 +222,7 @@ public class Template {
     }
 
     // Render one span of template text. `depth` bounds partial recursion.
-    string renderSpan(string src, Map<string, string> data, int depth) {
+    string renderSpan(string src, TemplateContext ctx, int depth) {
         var out: string = ""
         let n: int = String_Length(src)
         var i: int = 0
@@ -199,7 +244,7 @@ public class Template {
                         i = n
                     } else {
                         let key: string = String_Trim(String_Substring(src, open + 3, tclose - (open + 3)))
-                        out = out + Template.valueOf(data, key)
+                        out = out + Template.valueOf(ctx.Data, key)
                         i = tclose + 3
                     }
                 } else {
@@ -218,12 +263,12 @@ public class Template {
                             i = tagEnd
                         } else if (sigil == "&") {
                             let key: string = String_Trim(String_Substring(inner, 1, String_Length(inner) - 1))
-                            out = out + Template.valueOf(data, key)
+                            out = out + Template.valueOf(ctx.Data, key)
                             i = tagEnd
                         } else if (sigil == ">") {
                             let name: string = String_Trim(String_Substring(inner, 1, String_Length(inner) - 1))
                             if (depth < 32 && this.Partials.Has(name)) {
-                                out = out + this.renderSpan(this.Partials.Get(name), data, depth + 1)
+                                out = out + this.renderSpan(this.Partials.Get(name), ctx, depth + 1)
                             }
                             i = tagEnd
                         } else if (sigil == "#" || sigil == "^") {
@@ -237,11 +282,30 @@ public class Template {
                                 let closeEnd: int = Template.idxFrom(src, "}}", closeOpen + 2)
                                 var after: int = n
                                 if (closeEnd >= 0) { after = closeEnd + 2 }
-                                let truthy: bool = Template.isTruthy(data, key)
-                                var render: bool = false
-                                if (sigil == "#" && truthy)  { render = true }
-                                if (sigil == "^" && !truthy) { render = true }
-                                if (render) { out = out + this.renderSpan(block, data, depth) }
+
+                                if (ctx.Lists.Has(key)) {
+                                    // List-bound section (v0.40.0): iterate rows.
+                                    let rows: List<Map<string, string>> = ctx.Lists.Get(key)
+                                    let count: int = rows.Count()
+                                    if (sigil == "#") {
+                                        var r: int = 0
+                                        while (r < count) {
+                                            let merged: Map<string, string> = Template.mergeRow(ctx.Data, rows.Get(r))
+                                            let rowCtx: TemplateContext = new TemplateContext(merged, ctx.Lists)
+                                            out = out + this.renderSpan(block, rowCtx, depth)
+                                            r = r + 1
+                                        }
+                                    } else if (count == 0) {
+                                        // ^key on a bound (empty) list — empty-state block.
+                                        out = out + this.renderSpan(block, ctx, depth)
+                                    }
+                                } else {
+                                    let truthy: bool = Template.isTruthy(ctx.Data, key)
+                                    var render: bool = false
+                                    if (sigil == "#" && truthy)  { render = true }
+                                    if (sigil == "^" && !truthy) { render = true }
+                                    if (render) { out = out + this.renderSpan(block, ctx, depth) }
+                                }
                                 i = after
                             }
                         } else if (sigil == "/") {
@@ -255,11 +319,11 @@ public class Template {
                             // back to HTML-escape (fail safe).
                             let pipe: int = String_IndexOf(inner, "|")
                             if (pipe < 0) {
-                                out = out + Template.HtmlEscape(Template.valueOf(data, inner))
+                                out = out + Template.HtmlEscape(Template.valueOf(ctx.Data, inner))
                             } else {
                                 let k: string = String_Trim(String_Substring(inner, 0, pipe))
                                 let f: string = String_Trim(String_Substring(inner, pipe + 1, String_Length(inner) - pipe - 1))
-                                out = out + Template.applyFilter(Template.valueOf(data, k), f)
+                                out = out + Template.applyFilter(Template.valueOf(ctx.Data, k), f)
                             }
                             i = tagEnd
                         }
@@ -322,6 +386,27 @@ public class Template {
         if (v == "false") { return false }
         if (v == "0")     { return false }
         return true
+    }
+
+    // Row scope for list iteration: outer keys visible, row keys win on
+    // collision. A fresh map per row — outer/row inputs are untouched.
+    static Map<string, string> mergeRow(Map<string, string> outer, Map<string, string> row) {
+        var merged: Map<string, string> = new Map<string, string>()
+        let outerKeys: List<string> = outer.Keys()
+        var i: int = 0
+        while (i < outerKeys.Count()) {
+            let k: string = outerKeys.Get(i)
+            merged.Set(k, outer.Get(k))
+            i = i + 1
+        }
+        let rowKeys: List<string> = row.Keys()
+        i = 0
+        while (i < rowKeys.Count()) {
+            let k: string = rowKeys.Get(i)
+            merged.Set(k, row.Get(k))
+            i = i + 1
+        }
+        return merged
     }
 
     // indexOf `sub` in `s` starting at `start` (String_IndexOf is from 0).
