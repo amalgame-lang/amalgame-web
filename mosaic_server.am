@@ -240,8 +240,10 @@ public class MosaicServer {
     public int Serve(int port) {
         let router = this
         let handler = conn => {
-            let host: string = H1Conn.Header(conn, "host")
+            // conn is the int handle of the connection : read Host from the
+            // parsed request (H1Conn.Header wants the pointer, gcc 14+ refuses).
             let req: HttpRequest = HttpRequest.FromH1Conn(conn)
+            let host: string = req.Header("host")
             let sr: SseRoute = router.matchSseHost(host, req.Method, req.Path)
             if (sr != null) {
                 let sc: SseConn = SseConn.Open(conn)
@@ -275,8 +277,9 @@ public class MosaicServer {
         if (this.HttpRedirect) {
             let redirectWorker = (_a: int) => {
                 let redirect = conn => {
-                    let host: string = H1Conn.Header(conn, "host")
-                    let path: string = H1Conn.Path(conn)
+                    let rq: HttpRequest = HttpRequest.FromH1Conn(conn)
+                    let host: string = rq.Header("host")
+                    let path: string = rq.RawTarget
                     let rr: HttpResponse = HttpResponse.New().Redirect("https://" + host + path, true)
                     rr.WriteToH1Conn(conn)
                     return 0
@@ -313,8 +316,9 @@ public class MosaicServer {
         let router = this
         let www = this.WwwCanonical
         let handler = conn => {
-            let host: string = H1Conn.Header(conn, "host")
-            let path: string = H1Conn.Path(conn)
+            let req: HttpRequest = HttpRequest.FromH1Conn(conn)
+            let host: string = req.Header("host")
+            let path: string = req.RawTarget
             var hbare: string = host
             let hc: int = String_IndexOf(hbare, ":")
             if (hc >= 0) { hbare = String_Substring(hbare, 0, hc) }
@@ -327,7 +331,6 @@ public class MosaicServer {
                     return 0
                 }
             }
-            let req: HttpRequest = HttpRequest.FromH1Conn(conn)
             let sr: SseRoute = router.matchSseHost(host, req.Method, req.Path)
             if (sr != null) {
                 let sc: SseConn = SseConn.Open(conn)
